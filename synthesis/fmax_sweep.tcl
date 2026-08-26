@@ -1,0 +1,86 @@
+
+set script_dir [file normalize [file dirname [info script]]]
+set repo_dir   [file dirname $script_dir]
+set rtl_dir    [file join $repo_dir rtl]
+
+set part    "xc7z020clg400-1"
+set periods {4.0 8.0 12.0 14.0 15.0 16.0}
+set profile "v1"
+set core    "comb"
+
+if {![info exists argv]} { set argv {} }
+for {set i 0} {$i < [llength $argv]} {incr i} {
+    switch -- [lindex $argv $i] {
+        -profile { incr i; set profile [lindex $argv $i] }
+        -core    { incr i; set core    [lindex $argv $i] }
+        -periods { incr i; set periods [lindex $argv $i] }
+        default  { puts "warning: ignoring unknown argument [lindex $argv $i]" }
+    }
+}
+
+set report_dir [file join $script_dir reports]
+
+switch -- $core {
+    comb    { set top ngram_prefetcher }
+    pipe    { set top ngram_prefetcher_pipe; set report_dir [file join $report_dir pipe] }
+    default { error "unknown -core '$core' (expected comb or pipe)" }
+}
+
+switch -- $profile {
+    v1      { set define_args {} }
+    v2      { set define_args [list -verilog_define NGRAM_V2]; set report_dir [file join $report_dir v2] }
+    default { error "unknown -profile '$profile' (expected v1 or v2)" }
+}
+
+file mkdir $report_dir
+puts "\[SWEEP\] core $core ($top), profile $profile, periods $periods"
+
+set sources {
+    ngram_types_pkg.sv delta_generator.sv history_shift_reg.sv
+    xor_hash.sv sram_table.sv confidence_fsm.sv ngram_prefetcher.sv
+    ngram_prefetcher_pipe.sv
+}
+
+create_project -in_memory -part $part
+foreach f $sources {
+    read_verilog -sv [list [file join $rtl_dir $f]]
+}
+read_xdc [list [file join $script_dir constraints.xdc]]
+
+synth_design -top $top -part $part -mode out_of_context {*}$define_args
+set synth_dcp [file join $report_dir sweep_post_synth.dcp]
+write_checkpoint -force $synth_dcp
+
+set results {}
+
+foreach p $periods {
+    close_design
+    open_checkpoint $synth_dcp
+
+    create_clock -period $p -name clk [get_ports clk]
+    set_input_delay  -clock clk 1.000 [get_ports -filter {DIRECTION == IN && NAME != clk}]
+    set_output_delay -clock clk 1.000 [get_ports -filter {DIRECTION == OUT}]
+    set_false_path -from [get_ports rst]
+
+    opt_design -quiet
+    place_design -quiet
+    phys_opt_design -quiet
+    route_design -quiet
+
+    set wns [get_property SLACK [get_timing_paths -delay_type max]]
+    set met [expr {$wns >= 0 ? "MET" : "VIOLATED"}]
+    set fmax [expr {1000.0 / ($p - $wns)}]
+
+    lappend results [list $p $wns $met $fmax]
+    puts "\[SWEEP\] period=$p ns  WNS=$wns ns  $met  implied_fmax=[format %.1f $fmax] MHz"
+}
+
+puts "\[SWEEP\] =============================================================="
+puts "\[SWEEP\]  period(ns)   target(MHz)      WNS(ns)   status     Fmax(MHz)"
+puts "\[SWEEP\] --------------------------------------------------------------"
+foreach r $results {
+    lassign $r p wns met fmax
+    puts [format "\[SWEEP\]  %8.2f   %10.1f   %10.3f   %-9s  %8.1f" \
+          $p [expr {1000.0 / $p}] $wns $met $fmax]
+}
+puts "\[SWEEP\] =============================================================="
