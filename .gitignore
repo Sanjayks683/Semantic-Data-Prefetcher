@@ -8,9 +8,9 @@ __pycache__/
 build/
 .freebuff/
 
-# vivado
-synthesis/reports/
-*.jou
+# Vivado: keep the text reports as evidence, drop checkpoints and journals
 *.dcp
-vivado*.str
+*.jou
+*.str
 .Xil/
+clockInfo.txt

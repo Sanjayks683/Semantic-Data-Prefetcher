@@ -91,10 +91,11 @@ Markov is the interesting case: the predictor generates 4,419 candidates but 88%
 | IPCP (ISCA '20) | ~96% | 35-45% | ~12 KB | No | 1-2 cycles |
 | **This project** | **99.88%** | **45.59%** | **3,200 bytes** | **No** | **1 cycle** |
 
-Two honest caveats on this table:
+Three honest caveats on this table:
 
 - The published rows are measured on SPEC/GAP workloads, not on the four synthetic traces used here. The numbers are not directly comparable; the table is for rough positioning, not a head-to-head result.
-- "1 cycle" describes pipeline depth — address in to prefetch decision is one combinational path — not an achieved clock frequency. See [Synthesis](#synthesis) below.
+- "1 cycle" describes pipeline depth — address in to prefetch decision is one combinational path — not an achieved clock frequency.
+- That single-cycle path is also the design's main weakness: it synthesises at **≈70 MHz**, not at an L1-realistic clock. The commercial rows achieve 1-cycle latency at multi-GHz. See [Synthesis](#synthesis).
 
 ---
 
@@ -113,6 +114,7 @@ python tools/run_all_checks.py
 | `sim/test_prefetchers.py` | 12 tests: both prefetchers' learning and confidence behaviour, delta-overflow handling, both trace parsers |
 | `rtl/tb/tb_ngram_prefetcher.sv` | 65 assertions over 7 phases: cold start, learned cycle, same-index bypass, noise rejection, delta overflow, reset, retraining speed |
 | `tools/cosim_check.py` | Drives the RTL and the Python model with the same trace and diffs their prefetch streams access by access |
+| `synthesis/synth_vivado.tcl` | Synthesises and place-and-routes the design; reports real post-route timing, area and power |
 
 The co-simulation is the one that matters most:
 
@@ -132,14 +134,70 @@ The RTL testbench fails on a real regression rather than only on a crash. Removi
 ## Synthesis
 
 ```bash
-vivado -mode batch -source synthesis/synth_vivado.tcl
+vivado -mode batch -source synthesis/synth_vivado.tcl     # synth + place & route
+vivado -mode batch -source synthesis/fmax_sweep.tcl       # frequency sweep
 ```
 
-Constraints are read from `synthesis/constraints.xdc` **before** `synth_design`, so synthesis is optimised against the 250 MHz target rather than being constrained after the fact. The script runs the full `opt → place → phys_opt → route` flow and reports post-route WNS, because post-synthesis timing on an unconstrained netlist is not a meaningful Fmax.
+Constraints are read from `synthesis/constraints.xdc` **before** `synth_design`, so synthesis is optimised against the timing goal rather than being constrained after the fact. The script runs the full `opt → place → phys_opt → route` flow and quotes post-route WNS, because post-synthesis timing on an unconstrained netlist is not a meaningful Fmax.
 
-Storage is 1024 entries × 25 bits (1 valid + 6 tag + 16 delta + 2 confidence) = **25,600 bits / 3,200 bytes**. Valid bits are held in flip-flops so the table can be invalidated in one cycle at reset; the 24-bit payload lives in an unreset RAM so it infers as block/distributed RAM instead of ~25k flip-flops.
+Everything below is measured, not estimated. Reports are in [`synthesis/reports/`](synthesis/reports/).
 
-**I have not run this on a real Vivado install**, so no timing or utilisation numbers are quoted here. The script is correct and complete, but the achieved Fmax is unverified — running it will print post-route WNS and resource counts.
+**Target:** `xc7z020clg400-1` (Zynq-7000, Artix-7 fabric, −1 speed grade), Vivado 2026.1, out-of-context, 1.0 ns input + 1.0 ns output delay budget.
+
+> The original script targeted `xc7a100tcsg324-1`. Vivado 2026.1 no longer ships standalone 7-series Artix parts — only the Zynq-7000 families are installed — so the default part is now `xc7z020clg400-1`. Same 7-series fabric and same −1 speed grade, so the numbers are directly comparable. Override with `-tclargs -part <part>`.
+
+### Resource utilisation (post-route)
+
+| Resource | Used | Available | Util |
+|---|---:|---:|---:|
+| Slice LUTs | 2,289 | 53,200 | 4.30% |
+|   — as logic | 1,777 | | |
+|   — as distributed RAM | 512 | 17,400 | 2.94% |
+| Slice registers | 1,184 | 106,400 | 1.11% |
+| Slices | 693 | 13,300 | 5.21% |
+| Block RAM | 0 | 140 | 0% |
+| Total on-chip power | 0.174 W | | |
+
+The prediction table is 1024 × 25 bits (1 valid + 6 tag + 16 delta + 2 confidence) = **25,600 bits / 3,200 bytes**. The read is asynchronous, so the payload maps to **distributed RAM (512 LUTs)**, not BRAM — BRAM would need a registered read and a second cycle.
+
+**The `sram_table` fix is worth quantifying.** Synthesising the original version (whole array reset in one `always_ff`, no read-during-write bypass) against the identical rest of the design:
+
+| | Original | Fixed | |
+|---|---:|---:|---|
+| Flip-flops | 25,863 | **1,184** | 21.8× fewer |
+| LUTs | 8,581 | **2,286** | 3.8× fewer |
+| Distributed RAM | 0 | 512 | table now infers as RAM |
+
+The reset loop was forcing all 25,600 table bits into flip-flops. Splitting valid bits (1,024 flops, single-cycle invalidate) from the payload (unreset, RAM-inferrable) is the entire difference.
+
+### Timing — the 250 MHz target is not met
+
+| Target period | Target | Post-route WNS | Status |
+|---:|---:|---:|:---|
+| 4.0 ns | 250.0 MHz | −10.381 ns | **VIOLATED** |
+| 8.0 ns | 125.0 MHz | −5.808 ns | VIOLATED |
+| 12.0 ns | 83.3 MHz | −1.709 ns | VIOLATED |
+| 14.0 ns | 71.4 MHz | −0.281 ns | VIOLATED |
+| **15.0 ns** | **66.7 MHz** | **+0.175 ns** | **MET** |
+| 16.0 ns | 62.5 MHz | +0.678 ns | MET |
+
+**Measured Fmax ≈ 70 MHz**, and 66.7 MHz is the fastest constraint it reliably closes. That is nowhere near 250 MHz, and the earlier "250 MHz" figure in this README was an aspiration that had never been synthesised. It is now a measurement.
+
+The critical path runs straight from `mem_addr_in[7]` to `prefetch_addr_out[38]` — **36 logic levels, 28 of them CARRY4**, 12.346 ns of data path (5.66 ns logic, 6.68 ns routing):
+
+```
+mem_addr_in ─► 58-bit subtract (block delta)          ┐
+            ─► 43-bit overflow reduction              │ 28 CARRY4 stages
+            ─► XOR hash                               │ across the two
+            ─► 1024-deep async distributed-RAM read   │ wide adders
+            ─► tag + confidence compare               │
+            ─► 59-bit add (predicted block)           ┘
+            ─► prefetch_addr_out
+```
+
+Two ~58-bit ripple-carry adders in series with a deep asynchronous RAM read between them, all in one combinational path. Splitting out the I/O budget: pure internal logic needs 12.38 ns (**80.8 MHz**); the 1 ns in + 1 ns out out-of-context budget accounts for the rest.
+
+**This is architectural, not a bug.** The design is genuinely single-cycle — one access in, one prefetch decision out, same cycle — and that is exactly why it is slow. Reaching a realistic L1 clock would mean pipelining it into 3–4 stages, keeping one access per cycle of throughput while allowing several cycles of latency. That is a reasonable trade for a prefetcher, which sits off the demand-critical path and only needs its prediction to arrive before the data is used. **That pipelining is not implemented** — the numbers above are for the single-cycle design as it stands.
 
 ---
 
@@ -151,6 +209,7 @@ Storage is 1024 entries × 25 bits (1 valid + 6 tag + 16 delta + 2 confidence) =
 - **Shared across threads**: interleaved accesses from different threads would corrupt the delta history. A real CPU would need per-thread registers.
 - **Delta range**: deltas are stored in a 16-bit signed field, so a jump larger than ±32,767 blocks (±2 MB) cannot be represented. Rather than wrapping it into a bogus small delta, both implementations treat it as a discontinuity, report it (`delta_overflow` in RTL, `delta_overflows` in the model), and rebuild the window. The shipped pointer-chase trace already reaches ±15,436, so a heap much larger than 1 MB would start hitting this.
 - **Benchmark scope**: the four traces are synthetic and each uses a single instruction pointer. That means the stride baseline's 256-entry IP-indexed table is only ever exercised as a single entry, so the stride comparison is less demanding than it would be on a real multi-IP workload. Treat the stride numbers as a floor, not a tuned baseline.
+- **Clock frequency**: the single-cycle datapath synthesises at **≈70 MHz** on a −1 speed grade 7-series part — far below any real L1 clock. Two ~58-bit adders in series with a 1024-deep asynchronous RAM read between them is simply too much for one cycle. Fixing it means pipelining into 3–4 stages (throughput stays at one access per cycle; latency grows, which a prefetcher can absorb). Not implemented. The functional results above are unaffected — they are cycle-accurate at the algorithm level, not timing-dependent.
 
 ---
 
@@ -189,7 +248,9 @@ tools/
 
 synthesis/
   synth_vivado.tcl         - synthesis + place & route
+  fmax_sweep.tcl           - implements at several periods to find real Fmax
   constraints.xdc          - timing constraints (read before synthesis)
+  reports/                 - measured utilisation, timing, power, Fmax sweep
 
 results/                   - CSV + plots
 traces/                    - generated workload traces
