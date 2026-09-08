@@ -60,6 +60,13 @@ The main point: on pointer chasing where stride gets 0% coverage, this design el
 
 On regular array workloads it still works fine (>97% coverage), so it doesn't break anything.
 
+> **These traces are synthetic and were designed alongside the hardware.** They
+> produce 393–500 distinct delta contexts against a 1,024-entry table, so they
+> fit it exactly. Treat these numbers as an upper bound on favourable input, and
+> see [Real-workload evaluation](#real-workload-evaluation-spec-mcf) for what
+> happens on SPEC mcf — where this configuration manages 0.62% coverage, and a
+> correctly sized one at L2 beats stride.
+
 ### Prefetch traffic breakdown
 
 Coverage and accuracy alone hide how much work the predictor does, so the full counters are in `results/benchmark_results.csv`:
@@ -82,6 +89,87 @@ Coverage and accuracy alone hide how much work the predictor does, so the full c
 
 Markov is the interesting case: the predictor generates 4,419 candidates but 88% of them are already in cache, so only 524 actually cost bandwidth. The 100% accuracy figure is real but it describes a small number of issued prefetches, not a small number of predictions.
 
+## Real-workload evaluation (SPEC mcf)
+
+The four traces above are synthetic and were written alongside the hardware, so
+they cannot tell you whether the design generalises. This section runs the same
+model over `605.mcf_s` from the DPC-3 ChampSim trace set — a real SPEC workload
+nobody here designed — using 20,000,000 memory accesses.
+
+```bash
+python tools/run_champsim.py path/to/605.mcf_s-472B.champsimtrace.xz --limit 20000000
+python tools/run_champsim.py path/to/605.mcf_s-472B.champsimtrace.xz --level l2
+```
+
+### At L1, in the configuration this repository ships, it fails
+
+| | Misses | Miss rate | Coverage | Accuracy |
+|---|---:|---:|---:|---:|
+| No prefetch | 2,011,188 | 10.06% | — | — |
+| **Stride** | **613,534** | **3.07%** | **69.49%** | 99.93% |
+| **N-Gram** | 1,998,722 | 9.99% | **0.62%** | 79.78% |
+
+The baseline this design was built to beat gets 69.49%. This design gets 0.62%.
+It is not silent — it generated 3,895,894 predictions — but 99.6% of them were
+for lines already in cache, so only 16,540 were issued.
+
+Two measurements explain it:
+
+| | Synthetic traces | mcf (real) |
+|---|---:|---:|
+| Distinct 3-delta contexts | 393–500 | **503,503** |
+| Table entries | 1,024 | 1,024 |
+| Accesses overflowing the 16-bit delta field | 0% | **54.02%** |
+
+The synthetic traces produce 393–500 distinct contexts against a 1,024-entry
+table — a perfect fit, because the workloads and the hardware were sized
+together. Real code produces 503,503 against the same 1,024, a 491× overcommit,
+and half its deltas do not fit the 16-bit field at all.
+
+Importantly, the *idea* is not what fails. The correlation is genuinely present
+in real code: **91.7%** of 3-delta windows in mcf recur, and when one recurs the
+same delta follows **89.5%** of the time. The predictor simply has nowhere to
+put them.
+
+### At L2, correctly sized, it beats stride
+
+An L1 absorbs the regular, high-locality traffic; what survives to L2 is the
+irregular access this design targets. That is where a correlation prefetcher
+normally lives. Running an unprefetched 32 KB L1 in front and prefetching into a
+256 KB L2, with the delta field widened to 48 bits so the L1 miss stream no
+longer overflows it:
+
+| Table entries | Metadata | Coverage | Accuracy | vs stride |
+|---:|---:|---:|---:|---:|
+| 65,536 | 0.49 MB | 17.63% | 99.91% | −34.59 |
+| 131,072 | 1.00 MB | 33.58% | 99.94% | −18.63 |
+| 262,144 | 2.03 MB | 47.71% | 99.95% | −4.51 |
+| **524,288** | **4.12 MB** | **57.30%** | **99.95%** | **+5.08** |
+| 1,048,576 | 8.38 MB | 62.88% | 99.95% | +10.66 |
+| 2,097,152 | 17.00 MB | **66.28%** | 99.95% | **+14.07** |
+
+*(stride at L2: 52.22% coverage, 99.94% accuracy, ~2 KB)*
+
+From 524,288 entries upward the design beats a stride prefetcher on a real
+workload, at essentially perfect accuracy. Both changes are required — at 1,024
+entries the 48-bit version still returns 0.00%, and at 16-bit deltas the large
+table never accumulates a window.
+
+### What this means
+
+The algorithm works on real code. The *operating point in this repository does
+not*: 1,024 entries and a 16-bit delta field at L1 were, in effect, fitted to
+the synthetic benchmarks. The honest configuration is L2 placement, a 48-bit
+delta field, and a table three orders of magnitude larger.
+
+That is a real cost. Beating a ~2 KB stride prefetcher takes ~4 MB of metadata,
+so this is not a free win — it is the usual trade for irregular prefetching,
+where large metadata structures are the norm rather than the exception. The
+headline synthetic numbers should be read as an upper bound obtained on
+favourable workloads, and the mcf numbers as the generalisation result.
+
+---
+
 ## How it compares
 
 | | Array Coverage | Pointer Chase Coverage | Storage | Needs Compiler? | Pipeline depth |
@@ -89,13 +177,16 @@ Markov is the interesting case: the predictor generates 4,419 candidates but 88%
 | Intel/AMD stride prefetchers | ~95-99% | 0-5% | ~1-2 KB | No | 1 cycle |
 | Peled et al. (ISCA '15) | ~95% | 30-45% | ~31 KB | Yes (LLVM NOPs) | Multi-cycle |
 | IPCP (ISCA '20) | ~96% | 35-45% | ~12 KB | No | 1-2 cycles |
-| **This project** | **99.88%** | **45.59%** | **3,200 bytes** | **No** | **1 cycle** |
+| **This project** (synthetic) | **99.88%** | **45.59%** | **3,200 bytes** | **No** | **1 cycle** |
+| **This project** (real mcf, as shipped) | — | **0.62%** | 3,200 bytes | No | 1 cycle |
+| **This project** (real mcf, L2, resized) | — | **57.30%** | 4.12 MB | No | 1 cycle |
 
-Three honest caveats on this table:
+Four honest caveats on this table:
 
 - The published rows are measured on SPEC/GAP workloads, not on the four synthetic traces used here. The numbers are not directly comparable; the table is for rough positioning, not a head-to-head result.
 - "1 cycle" describes pipeline depth — address in to prefetch decision is one combinational path — not an achieved clock frequency.
 - That single-cycle path is also the design's main weakness: it synthesises at **≈70 MHz**, not at an L1-realistic clock. The commercial rows achieve 1-cycle latency at multi-GHz. See [Synthesis](#synthesis).
+- The 45.59% figure is from synthetic traces. On a real workload the shipped configuration gets 0.62%; beating stride requires L2 placement and ~4 MB of metadata, which is a different design point from the 3,200-byte row above.
 
 ---
 
@@ -115,6 +206,7 @@ python tools/run_all_checks.py
 | `rtl/tb/tb_ngram_prefetcher.sv` | 65 assertions over 7 phases: cold start, learned cycle, same-index bypass, noise rejection, delta overflow, reset, retraining speed |
 | `tools/cosim_check.py` | Drives the RTL and the Python model with the same trace and diffs their prefetch streams access by access |
 | `synthesis/synth_vivado.tcl` | Synthesises and place-and-routes the design; reports real post-route timing, area and power |
+| `tools/run_champsim.py` | Evaluates against a real SPEC workload rather than the synthetic traces, at L1 or L2 |
 
 The co-simulation is the one that matters most:
 
@@ -209,6 +301,8 @@ Two ~58-bit ripple-carry adders in series with a deep asynchronous RAM read betw
 - **Shared across threads**: interleaved accesses from different threads would corrupt the delta history. A real CPU would need per-thread registers.
 - **Delta range**: deltas are stored in a 16-bit signed field, so a jump larger than ±32,767 blocks (±2 MB) cannot be represented. Rather than wrapping it into a bogus small delta, both implementations treat it as a discontinuity, report it (`delta_overflow` in RTL, `delta_overflows` in the model), and rebuild the window. The shipped pointer-chase trace already reaches ±15,436, so a heap much larger than 1 MB would start hitting this.
 - **Benchmark scope**: the four traces are synthetic and each uses a single instruction pointer. That means the stride baseline's 256-entry IP-indexed table is only ever exercised as a single entry, so the stride comparison is less demanding than it would be on a real multi-IP workload. Treat the stride numbers as a floor, not a tuned baseline.
+- **Table capacity is the binding constraint on real code**: mcf presents 503,503 distinct 3-delta contexts where the shipped table holds 1,024. Coverage scales directly with table size (17.63% at 64K entries, 57.30% at 512K, 66.28% at 2M), so the 1,024-entry configuration is far below the knee of that curve on any real workload. The synthetic traces hide this completely because they only generate 393–500 contexts.
+- **The 16-bit delta field is too narrow for real address streams**: 54% of mcf's accesses, and 78% of its L1 miss stream, exceed it — real programs interleave stack and heap regions that are gigabytes apart. 48 bits removes the problem entirely.
 - **Clock frequency**: the single-cycle datapath synthesises at **≈70 MHz** on a −1 speed grade 7-series part — far below any real L1 clock. Two ~58-bit adders in series with a 1024-deep asynchronous RAM read between them is simply too much for one cycle. Fixing it means pipelining into 3–4 stages (throughput stays at one access per cycle; latency grows, which a prefetcher can absorb). Not implemented. The functional results above are unaffected — they are cycle-accurate at the algorithm level, not timing-dependent.
 
 ---
@@ -243,6 +337,7 @@ rtl/
 
 tools/
   run_all_checks.py        - runs everything below, one verdict
+  run_champsim.py          - evaluate on a real ChampSim trace (L1 or L2)
   check_rtl_sync.py        - RTL/model parameter agreement
   cosim_check.py           - RTL/model behavioural equivalence
 

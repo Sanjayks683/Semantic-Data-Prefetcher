@@ -9,8 +9,9 @@ is reported with the access index, so a divergence is actionable rather than
 showing up later as an unexplained gap in coverage.
 
 Usage:
-    python tools/cosim_check.py                 # all traces in traces/
-    python tools/cosim_check.py streaming.trace # one trace
+    python tools/cosim_check.py                        # all traces in traces/
+    python tools/cosim_check.py streaming.trace        # one trace
+    python tools/cosim_check.py mcf.xz --limit 1000000 # cap a huge real trace
 
 Requires Icarus Verilog (iverilog / vvp) on PATH.
 """
@@ -18,8 +19,10 @@ Requires Icarus Verilog (iverilog / vvp) on PATH.
 import os
 import sys
 import shutil
+import argparse
 import subprocess
 import tempfile
+import itertools
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIM_DIR = os.path.join(REPO, "sim")
@@ -66,22 +69,27 @@ def build(workdir):
     return out
 
 
-def run_model(trace_path):
+def stream(trace_path, limit):
+    it = get_trace_iterator(trace_path)
+    return itertools.islice(it, limit) if limit else it
+
+
+def run_model(trace_path, limit=None):
     """Return {access_index: prefetch_address} for the Python model."""
     p = NGramPrefetcher()
     out = {}
-    for i, (ip, addr) in enumerate(get_trace_iterator(trace_path)):
+    for i, (ip, addr) in enumerate(stream(trace_path, limit)):
         pf = p.access(ip, addr)
         if pf is not None:
             out[i] = pf
     return out, p
 
 
-def run_rtl(binary, trace_path, workdir):
+def run_rtl(binary, trace_path, workdir, limit=None):
     """Return {access_index: prefetch_address} for the SystemVerilog DUT."""
     addr_file = os.path.join(workdir, "addrs.txt")
     with open(addr_file, "w") as f:
-        for _, addr in get_trace_iterator(trace_path):
+        for _, addr in stream(trace_path, limit):
             f.write(f"{addr:x}\n")
 
     out_file = os.path.join(workdir, "rtl_out.txt")
@@ -132,6 +140,14 @@ def compare(name, model, rtl, accesses):
 
 
 def main(argv):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("traces", nargs="*")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="cap the number of accesses (for very large real traces)")
+    args = ap.parse_args(argv)
+    argv = args.traces
+    limit = args.limit
+
     require_tools()
 
     if not os.path.isdir(TRACES_DIR):
@@ -164,9 +180,9 @@ def main(argv):
                 all_ok = False
                 continue
 
-            accesses = sum(1 for _ in get_trace_iterator(path))
-            model, model_obj = run_model(path)
-            rtl = run_rtl(binary, path, workdir)
+            accesses = sum(1 for _ in stream(path, limit))
+            model, model_obj = run_model(path, limit)
+            rtl = run_rtl(binary, path, workdir, limit)
 
             ok = compare(os.path.basename(t), model, rtl, accesses)
             if model_obj.delta_overflows:

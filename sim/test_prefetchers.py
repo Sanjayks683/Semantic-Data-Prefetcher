@@ -211,6 +211,42 @@ def test_champsim_parser_extracts_all_memory_operands():
     )
 
 
+def test_champsim_parser_spans_read_boundaries():
+    """Records must decode correctly across the internal read-block boundary.
+
+    The reader pulls many records per LZMA read for speed; a record straddling
+    two blocks is the case that silently corrupts or drops accesses.
+    """
+    from trace_parser import _RECORDS_PER_READ
+
+    count = _RECORDS_PER_READ * 2 + 7   # deliberately not a block multiple
+    blob = b"".join(
+        struct.pack(
+            INSTR_STRUCT_FORMAT,
+            0x400000 + k, 0, 0,
+            b"\x01\x02", b"\x03\x04\x05\x06",
+            0xD000 + k, 0,
+            0xA000 + k, 0, 0, 0,
+        )
+        for k in range(count)
+    )
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".xz", delete=False)
+    tmp.close()
+    with lzma.open(tmp.name, "wb") as f:
+        f.write(blob)
+    try:
+        rows = list(parse_champsim_binary_trace(tmp.name))
+    finally:
+        os.unlink(tmp.name)
+
+    assert len(rows) == count * 2, (
+        f"expected {count * 2} operands from {count} records, got {len(rows)}"
+    )
+    assert rows[0] == (0x400000, 0xA000)
+    assert rows[-1] == (0x400000 + count - 1, 0xD000 + count - 1)
+
+
 def run_tests():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

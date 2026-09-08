@@ -54,29 +54,46 @@ def parse_text_trace(filepath):
                 raise ValueError(f"{filepath}:{line_no}: {exc}") from exc
 
 
+# Records are decoded a block at a time. Reading 64 bytes per call through the
+# LZMA stream dominates runtime on real traces, which are tens of millions of
+# instructions long.
+_RECORDS_PER_READ = 8192
+_READ_CHUNK = STRUCT_SIZE * _RECORDS_PER_READ
+
+_unpack_from = struct.Struct(INSTR_STRUCT_FORMAT).unpack_from
+
+
 def parse_champsim_binary_trace(filepath):
     """Yield (ip, addr) for every non-zero memory operand of each instruction."""
     with lzma.open(filepath, "rb") as f:
+        leftover = b""
         while True:
-            chunk = f.read(STRUCT_SIZE)
+            chunk = f.read(_READ_CHUNK)
             if not chunk:
                 break
-            if len(chunk) < STRUCT_SIZE:
-                raise ValueError(
-                    f"{filepath}: trailing {len(chunk)} bytes do not form a "
-                    f"complete {STRUCT_SIZE}-byte record"
-                )
+            if leftover:
+                chunk = leftover + chunk
 
-            fields = struct.unpack(INSTR_STRUCT_FORMAT, chunk)
-            ip = fields[_F_IP]
+            whole = len(chunk) // STRUCT_SIZE
+            for r in range(whole):
+                fields = _unpack_from(chunk, r * STRUCT_SIZE)
+                ip = fields[_F_IP]
 
-            for addr in fields[_F_SRC_MEM]:
-                if addr != 0:
-                    yield ip, addr
+                for addr in fields[_F_SRC_MEM]:
+                    if addr != 0:
+                        yield ip, addr
 
-            for addr in fields[_F_DEST_MEM]:
-                if addr != 0:
-                    yield ip, addr
+                for addr in fields[_F_DEST_MEM]:
+                    if addr != 0:
+                        yield ip, addr
+
+            leftover = chunk[whole * STRUCT_SIZE:]
+
+        if leftover:
+            raise ValueError(
+                f"{filepath}: trailing {len(leftover)} bytes do not form a "
+                f"complete {STRUCT_SIZE}-byte record"
+            )
 
 
 def get_trace_iterator(filepath):
