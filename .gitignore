@@ -3,3 +3,14 @@ __pycache__/
 *.out
 *.log
 .DS_Store
+
+# build artefacts
+build/
+.freebuff/
+
+# vivado
+synthesis/reports/
+*.jou
+*.dcp
+vivado*.str
+.Xil/
