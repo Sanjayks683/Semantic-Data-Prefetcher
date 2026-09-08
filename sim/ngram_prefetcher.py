@@ -33,19 +33,43 @@ class TableEntry:
 
 class NGramPrefetcher:
     def __init__(self, depth=NGRAM_DEPTH, table_size=TABLE_SIZE,
-                 conf_threshold=CONFIDENCE_THRESHOLD):
+                 conf_threshold=CONFIDENCE_THRESHOLD,
+                 delta_width=DELTA_WIDTH, tag_bits=TAG_BITS):
+        """Defaults reproduce the configuration the RTL implements.
+
+        depth, table_size, delta_width and tag_bits are overridable so the
+        design-space sweep in tools/sizing_sweep.py can exercise this exact
+        model rather than a re-implementation of it. Only the default
+        configuration is checked against the RTL by tools/cosim_check.py.
+        """
         if table_size <= 0 or (table_size & (table_size - 1)) != 0:
             raise ValueError(f"table_size must be a power of two, got {table_size}")
-        if depth != NGRAM_DEPTH:
-            raise ValueError(
-                f"depth={depth} does not match config.NGRAM_DEPTH={NGRAM_DEPTH}; "
-                "the rotation schedule is derived from the configured depth"
-            )
+        if depth < 1:
+            raise ValueError(f"depth must be at least 1, got {depth}")
+        if delta_width < 2:
+            raise ValueError(f"delta_width must be at least 2, got {delta_width}")
 
         self.depth = depth
         self.table_size = table_size
         self.index_bits = table_size.bit_length() - 1
         self.conf_threshold = conf_threshold
+
+        self.delta_width = delta_width
+        self.tag_bits = tag_bits
+        self.delta_mask = (1 << delta_width) - 1
+        self.delta_min = -(1 << (delta_width - 1))
+        self.delta_max = (1 << (delta_width - 1)) - 1
+
+        if self.index_bits + tag_bits > delta_width:
+            raise ValueError(
+                f"index_bits ({self.index_bits}) + tag_bits ({tag_bits}) exceeds "
+                f"delta_width ({delta_width}); the hash has no room for both"
+            )
+
+        # Same schedule config.ROTATES uses, evaluated for this instance.
+        self.rotates = tuple(
+            (i * 4 - 1) % delta_width if i > 0 else 0 for i in range(depth)
+        )
 
         self.history = [0] * depth
         self.history_valid_count = 0
@@ -59,14 +83,14 @@ class NGramPrefetcher:
         # did not fit in the DELTA_WIDTH-bit field the hardware provides.
         self.delta_overflows = 0
 
-    @staticmethod
-    def _rotate_left(value, amount, width=DELTA_WIDTH):
-        """Rotate a `width`-bit value left by `amount`, matching the RTL concat."""
-        value &= (1 << width) - 1
+    def _rotate_left(self, value, amount):
+        """Rotate a delta_width-bit value left by `amount`, matching the RTL concat."""
+        width = self.delta_width
+        value &= self.delta_mask
         amount %= width
         if amount == 0:
             return value
-        return ((value << amount) | (value >> (width - amount))) & ((1 << width) - 1)
+        return ((value << amount) | (value >> (width - amount))) & self.delta_mask
 
     def _compute_hash(self, history_window):
         """Fold the n-gram window into an (index, tag) pair.
@@ -75,11 +99,11 @@ class NGramPrefetcher:
         of identical deltas does not collapse to zero. Mirrors rtl/xor_hash.sv.
         """
         full_hash = 0
-        for tap, rot in zip(history_window, ROTATES):
-            full_hash ^= self._rotate_left(tap & DELTA_MASK, rot)
+        for tap, rot in zip(history_window, self.rotates):
+            full_hash ^= self._rotate_left(tap & self.delta_mask, rot)
 
         index = full_hash & (self.table_size - 1)
-        tag = (full_hash >> self.index_bits) & ((1 << TAG_BITS) - 1)
+        tag = (full_hash >> self.index_bits) & ((1 << self.tag_bits) - 1)
         return index, tag
 
     def _reset_history(self):
@@ -104,7 +128,7 @@ class NGramPrefetcher:
         # A delta that does not fit the hardware field is a discontinuity, not a
         # pattern. Wrapping it would poison the table with a bogus correlation,
         # so drop the window and start rebuilding from the next access.
-        if not (DELTA_MIN <= curr_delta <= DELTA_MAX):
+        if not (self.delta_min <= curr_delta <= self.delta_max):
             self.delta_overflows += 1
             self._reset_history()
             self.prev_block_addr = curr_block
