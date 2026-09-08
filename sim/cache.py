@@ -1,3 +1,10 @@
+"""
+cache.py - Set-associative L1 data cache model with true LRU replacement.
+
+Tracks per-line prefetch provenance so the metrics layer can tell a demand hit
+on a prefetched line (a useful prefetch) from an ordinary hit.
+"""
+
 from config import CACHE_SETS, CACHE_WAYS, BLOCK_OFFSET_BITS, SET_INDEX_BITS
 
 
@@ -14,6 +21,8 @@ class Cache:
     def __init__(self):
         self.sets = [[CacheLine() for _ in range(CACHE_WAYS)] for _ in range(CACHE_SETS)]
         self.global_lru = 0
+        # Prefetched lines evicted before any demand access ever used them.
+        self.dead_prefetch_evictions = 0
 
     def _decompose_address(self, addr):
         block_addr = addr >> BLOCK_OFFSET_BITS
@@ -59,6 +68,9 @@ class Cache:
 
         target_way = empty_way if empty_way is not None else victim_way
         evicted = target_way.valid
+
+        if evicted and target_way.is_prefetched and not target_way.was_useful:
+            self.dead_prefetch_evictions += 1
 
         target_way.valid = True
         target_way.tag = tag
