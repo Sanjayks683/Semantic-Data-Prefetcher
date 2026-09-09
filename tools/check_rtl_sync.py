@@ -40,10 +40,40 @@ LOCALPARAM_RE = re.compile(
 )
 
 
-def parse_package(path):
+def resolve_ifdefs(text, defines):
+    """Flatten `ifdef / `else / `endif blocks for the given set of defines.
+
+    The package selects NGRAM_DEPTH per profile, so the parser has to pick the
+    same branch the Verilog compiler would rather than matching both.
+    """
+    out, stack = [], []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("`ifdef "):
+            stack.append(stripped.split()[1] in defines)
+            continue
+        if stripped.startswith("`ifndef "):
+            stack.append(stripped.split()[1] not in defines)
+            continue
+        if stripped == "`else":
+            if stack:
+                stack[-1] = not stack[-1]
+            continue
+        if stripped == "`endif":
+            if stack:
+                stack.pop()
+            continue
+        if all(stack):
+            out.append(line)
+    return "\n".join(out)
+
+
+def parse_package(path, defines=()):
     """Extract integer localparams, resolving $clog2 and references to earlier ones."""
     with open(path) as f:
         text = f.read()
+
+    text = resolve_ifdefs(text, set(defines))
 
     values = {}
     for name, expr in LOCALPARAM_RE.findall(text):
@@ -74,9 +104,11 @@ def main():
         print(f"error: {PKG_PATH} not found")
         return 2
 
-    rtl = parse_package(PKG_PATH)
+    # Pick the same `ifdef branch the Verilog compiler would for this profile.
+    defines = {"v1": (), "v2": ("NGRAM_V2",)}[config.PROFILE]
+    rtl = parse_package(PKG_PATH, defines)
 
-    print("\nRTL / model parameter sync")
+    print(f"\nRTL / model parameter sync  [profile {config.PROFILE}]")
     print("=" * 66)
     print(f"  {'parameter':<22} {'RTL':>10} {'model':>10}   status")
     print("-" * 66)

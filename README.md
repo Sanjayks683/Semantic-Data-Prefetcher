@@ -179,6 +179,71 @@ building for a given workload is a question with a cheap, quantitative answer.
 
 ---
 
+## Two configurations: v1 and v2
+
+The history depth was never swept — it was fixed at 3 from the start. Sweeping
+it (`tools/sizing_sweep.py --depths`) found 3 to be the worst of the values
+tested, on every workload measured. Rather than silently changing the design,
+both configurations are kept and both are verified:
+
+| | History window | Selected by | Results |
+|---|---|---|---|
+| **v1** | 3 deltas | default | `results/benchmark_results.csv` |
+| **v2** | 2 deltas | `NGRAM_PROFILE=v2` / `-DNGRAM_V2` | `results/benchmark_results_v2.csv` |
+
+v1 is the design as originally built and verified; its numbers are unchanged and
+remain the reference. v2 changes the window depth and nothing else.
+
+```bash
+python sim/main.py                          # v1
+NGRAM_PROFILE=v2 python sim/main.py         # v2
+
+iverilog -g2012 ... rtl/*.sv                # v1 RTL
+iverilog -g2012 -DNGRAM_V2 ... rtl/*.sv     # v2 RTL
+```
+
+**There is one RTL source and one behavioural model.** The depth is selected by
+`` `ifdef NGRAM_V2`` in `rtl/ngram_types_pkg.sv` and by `NGRAM_PROFILE` in
+`sim/config.py`, so the two configurations cannot drift apart.
+`tools/run_all_checks.py` verifies both — 11 checks, including RTL/model
+co-simulation for each profile independently.
+
+### What v2 buys
+
+On the synthetic traces:
+
+| Workload | v1 coverage | v2 coverage | Δ |
+|---|---:|---:|---:|
+| Streaming | 99.88% | 99.90% | +0.02 |
+| Matrix | 97.56% | 97.68% | +0.12 |
+| Pointer Chase | 45.59% | 45.62% | +0.03 |
+| **Markov** | 35.60% | **40.15%** | **+4.55** |
+
+On the real workloads at L2 with a 48-bit delta field and 524,288 entries:
+
+| Workload | depth 1 | depth 2 (v2) | depth 3 (v1) | stride |
+|---|---:|---:|---:|---:|
+| **mcf** | 56.31% | **61.48%** | 57.30% | 52.22% |
+| **omnetpp** | **6.27%** | 3.93% | 2.43% | 4.55% |
+
+Depth 2 is at least as good as depth 3 on all six workloads. Depth 1 is better
+still on streaming, matrix and omnetpp — and notably beats stride on omnetpp at
+every table size tested, including 16,384 entries (134 KB). Coverage falls
+monotonically past depth 2 while accuracy rises, which is the expected
+specificity trade: a longer context matches less often but predicts better when
+it does.
+
+Depth 3 only looked reasonable on the synthetic traces because those were built
+around 3- and 4-step cycles. It was chosen, not measured.
+
+Worth stating plainly: the best depths measured are **1 and 2**, so the
+"3-delta n-gram" this project is named for is not the configuration the evidence
+supports. v2 is kept at depth 2 rather than depth 1 because it is the best
+single choice across all six workloads; depth 1 wins on more of them but loses
+badly on mcf and markov.
+
+---
+
 ## How it compares
 
 | | Array Coverage | Pointer Chase Coverage | Storage | Needs Compiler? | Pipeline depth |
@@ -348,7 +413,7 @@ rtl/
     tb_cosim.sv            - trace-driven harness for co-simulation
 
 tools/
-  run_all_checks.py        - runs everything below, one verdict
+  run_all_checks.py        - runs everything below for both profiles
   run_champsim.py          - evaluate on a real ChampSim trace (L1 or L2)
   sizing_sweep.py          - sweep table size and delta width against a trace
   check_rtl_sync.py        - RTL/model parameter agreement
