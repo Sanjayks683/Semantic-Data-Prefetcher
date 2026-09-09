@@ -39,7 +39,12 @@ from config import CONF_BITS                     # noqa: E402
 
 DEFAULT_ENTRIES = [1024, 16384, 65536, 262144, 524288, 2097152]
 DEFAULT_WIDTHS = [16, 48]
+DEFAULT_DEPTHS = [3]
 MAX_TAG_BITS = 16
+
+
+def int_list(text):
+    return [int(x) for x in text.replace(",", " ").split()]
 
 
 def tag_bits_for(entries, delta_width):
@@ -105,6 +110,12 @@ def main():
     ap.add_argument("--limit", type=int, default=20_000_000)
     ap.add_argument("--l2-sets", type=int, default=512)
     ap.add_argument("--l2-ways", type=int, default=8)
+    ap.add_argument("--entries", type=int_list, default=DEFAULT_ENTRIES,
+                    help="table sizes to sweep (comma separated)")
+    ap.add_argument("--widths", type=int_list, default=DEFAULT_WIDTHS,
+                    help="delta widths to sweep")
+    ap.add_argument("--depths", type=int_list, default=DEFAULT_DEPTHS,
+                    help="n-gram history depths to sweep")
     ap.add_argument("--csv")
     args = ap.parse_args()
 
@@ -129,39 +140,42 @@ def main():
     print(f"  STRIDE reference: {stride_cov:.2f}% coverage, "
           f"{stride.accuracy:.2f}% accuracy, ~2 KB\n")
 
-    print(f"{'delta':>6} {'entries':>10} {'tag':>4} {'storage':>10} {'ovf%':>7} "
-          f"{'cover%':>8} {'accur%':>8} {'vs stride':>10}")
-    print("-" * 78)
+    print(f"{'depth':>6} {'delta':>6} {'entries':>10} {'tag':>4} {'storage':>10} "
+          f"{'ovf%':>7} {'cover%':>8} {'accur%':>8} {'issued':>10} {'vs stride':>10}")
+    print("-" * 92)
 
     rows = []
-    for dw in DEFAULT_WIDTHS:
-        for entries in DEFAULT_ENTRIES:
-            tb = tag_bits_for(entries, dw)
-            if entries.bit_length() - 1 + tb > dw:
-                continue    # index + tag cannot fit in one delta word
-            pf = NGramPrefetcher(table_size=entries, delta_width=dw, tag_bits=tb)
-            m = run(ips, addrs, pf, args.level, args.l2_sets, args.l2_ways)
+    for depth in args.depths:
+        for dw in args.widths:
+            for entries in args.entries:
+                tb = tag_bits_for(entries, dw)
+                if entries.bit_length() - 1 + tb > dw:
+                    continue    # index + tag cannot fit in one delta word
+                pf = NGramPrefetcher(table_size=entries, delta_width=dw,
+                                     tag_bits=tb, depth=depth)
+                m = run(ips, addrs, pf, args.level, args.l2_sets, args.l2_ways)
 
-            cov = m.compute_coverage(base_misses)
-            sb = storage_bytes(entries, dw, tb)
-            ovf = pf.delta_overflows / max(1, baseline.total_accesses) * 100
-            delta_vs = cov - stride_cov
+                cov = m.compute_coverage(base_misses)
+                sb = storage_bytes(entries, dw, tb)
+                ovf = pf.delta_overflows / max(1, baseline.total_accesses) * 100
+                delta_vs = cov - stride_cov
 
-            print(f"{dw:>6} {entries:>10,} {tb:>4} {sb/1024:>9.0f}K {ovf:>6.1f}% "
-                  f"{cov:>7.2f}% {m.accuracy:>7.2f}% {delta_vs:>+9.2f} "
-                  f"{'BEATS' if delta_vs > 0 else ''}")
+                print(f"{depth:>6} {dw:>6} {entries:>10,} {tb:>4} {sb/1024:>9.0f}K "
+                      f"{ovf:>6.1f}% {cov:>7.2f}% {m.accuracy:>7.2f}% "
+                      f"{m.prefetches_issued:>10,} {delta_vs:>+9.2f} "
+                      f"{'BEATS' if delta_vs > 0 else ''}")
 
-            rows.append({
-                "workload": name, "level": args.level.upper(),
-                "delta_width": dw, "entries": entries, "tag_bits": tb,
-                "storage_bytes": int(sb), "overflow_pct": round(ovf, 4),
-                "coverage": round(cov, 4), "accuracy": round(m.accuracy, 4),
-                "pollution": round(m.pollution_rate, 4),
-                "issued": m.prefetches_issued,
-                "stride_coverage": round(stride_cov, 4),
-            })
+                rows.append({
+                    "workload": name, "level": args.level.upper(), "depth": depth,
+                    "delta_width": dw, "entries": entries, "tag_bits": tb,
+                    "storage_bytes": int(sb), "overflow_pct": round(ovf, 4),
+                    "coverage": round(cov, 4), "accuracy": round(m.accuracy, 4),
+                    "pollution": round(m.pollution_rate, 4),
+                    "issued": m.prefetches_issued,
+                    "stride_coverage": round(stride_cov, 4),
+                })
 
-    print("-" * 78)
+    print("-" * 92)
 
     if args.csv:
         with open(args.csv, "w", newline="") as f:
