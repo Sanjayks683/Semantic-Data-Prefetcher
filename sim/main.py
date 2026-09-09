@@ -11,7 +11,8 @@ from stride_prefetcher import StridePrefetcher
 from ngram_prefetcher import NGramPrefetcher
 from metrics import Metrics
 from trace_parser import get_trace_iterator
-from config import CACHE_SETS, CACHE_WAYS, BLOCK_SIZE, CACHE_CAPACITY_BYTES
+from config import (CACHE_SETS, CACHE_WAYS, BLOCK_SIZE,
+                    CACHE_CAPACITY_BYTES, NGRAM_DEPTH, PROFILE)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRACES_DIR = os.path.join(BASE_DIR, "..", "traces")
@@ -81,11 +82,15 @@ def run_all_benchmarks():
         print("Run 'python generate_trace.py' first.")
         return 1
 
-    csv_path = os.path.join(RESULTS_DIR, "benchmark_results.csv")
+    # v1 keeps the original filename so its results stay directly comparable;
+    # any other profile writes alongside it rather than overwriting.
+    suffix = "" if PROFILE == "v1" else f"_{PROFILE}"
+    csv_path = os.path.join(RESULTS_DIR, f"benchmark_results{suffix}.csv")
     csv_rows = []
 
     print("\n" + "=" * 75)
     print("   L1 Cache Simulation: Stride vs Semantic N-Gram Prefetcher")
+    print(f"   profile {PROFILE}: {NGRAM_DEPTH}-delta history window")
     print(f"   {CACHE_CAPACITY_BYTES // 1024} KB, {CACHE_WAYS}-way, "
           f"{CACHE_SETS} sets, {BLOCK_SIZE} B lines")
     print("=" * 75)

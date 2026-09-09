@@ -16,7 +16,24 @@ package ngram_types_pkg;
 
     // ------------------------------------------------------------ n-gram ----
     localparam int DELTA_WIDTH   = 16;
+
+    // Two configurations share this one RTL source, so they cannot drift apart:
+    //
+    //   default        v1 - the design as originally built and verified,
+    //                       using a 3-delta history window.
+    //   `NGRAM_V2      v2 - a 2-delta window, which the depth sweep found to be
+    //                       better on every workload measured. Nothing else
+    //                       differs between the two.
+    //
+    // Build v2 with `iverilog -DNGRAM_V2 ...` or, in Vivado,
+    // `synth_design -verilog_define NGRAM_V2 ...`. sim/config.py selects the
+    // matching profile via NGRAM_PROFILE=v2, and tools/check_rtl_sync.py
+    // verifies the two agree for both profiles.
+`ifdef NGRAM_V2
+    localparam int NGRAM_DEPTH   = 2;
+`else
     localparam int NGRAM_DEPTH   = 3;
+`endif
 
     localparam int TABLE_ENTRIES = 1024;
     localparam int INDEX_BITS    = $clog2(TABLE_ENTRIES);

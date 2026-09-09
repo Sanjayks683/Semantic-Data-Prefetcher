@@ -47,6 +47,11 @@ RTL_SOURCES = [
 
 MAX_REPORTED = 10
 
+# Selected the same way sim/config.py selects it, so the RTL build and the
+# Python model can never be checked against each other under different profiles.
+PROFILE = os.environ.get("NGRAM_PROFILE", "v1").strip().lower()
+VERILOG_DEFINES = {"v1": [], "v2": ["-DNGRAM_V2"]}
+
 
 def require_tools():
     missing = [t for t in ("iverilog", "vvp") if shutil.which(t) is None]
@@ -58,7 +63,10 @@ def require_tools():
 
 def build(workdir):
     out = os.path.join(workdir, "cosim.out")
-    cmd = ["iverilog", "-g2012", "-o", out] + [
+    if PROFILE not in VERILOG_DEFINES:
+        print(f"error: unknown NGRAM_PROFILE={PROFILE!r}")
+        sys.exit(2)
+    cmd = ["iverilog", "-g2012"] + VERILOG_DEFINES[PROFILE] + ["-o", out] + [
         os.path.join(RTL_DIR, s) for s in RTL_SOURCES
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)

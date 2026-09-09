@@ -7,6 +7,8 @@ these values in rtl/ngram_types_pkg.sv; check_rtl_sync.py verifies the two
 stay in agreement.
 """
 
+import os
+
 
 def _log2_exact(value, name):
     """Return log2(value), rejecting anything that is not a positive power of two."""
@@ -25,7 +27,31 @@ SET_INDEX_BITS = _log2_exact(CACHE_SETS, "CACHE_SETS")
 CACHE_CAPACITY_BYTES = CACHE_SETS * CACHE_WAYS * BLOCK_SIZE
 
 # ------------------------------------------------------- N-Gram prefetcher --
-NGRAM_DEPTH = 3
+# Two configurations are supported. Select with the NGRAM_PROFILE environment
+# variable; "v1" is the default so existing results and scripts are unaffected.
+#
+#   v1  the design as originally built and verified: a 3-delta history window.
+#   v2  the same design with a 2-delta window, which the depth sweep in
+#       tools/sizing_sweep.py found to be better on every workload measured
+#       (see results/depth_sweep_*.csv). Nothing else changes.
+#
+# The RTL mirrors this: rtl/ngram_types_pkg.sv selects the same two depths on
+# `ifdef NGRAM_V2, so one RTL source builds either profile and the two cannot
+# drift apart. tools/check_rtl_sync.py verifies both.
+
+PROFILES = {
+    "v1": {"NGRAM_DEPTH": 3},
+    "v2": {"NGRAM_DEPTH": 2},
+}
+
+PROFILE = os.environ.get("NGRAM_PROFILE", "v1").strip().lower()
+if PROFILE not in PROFILES:
+    raise ValueError(
+        f"NGRAM_PROFILE={PROFILE!r} is not a known profile; "
+        f"expected one of {sorted(PROFILES)}"
+    )
+
+NGRAM_DEPTH = PROFILES[PROFILE]["NGRAM_DEPTH"]
 TABLE_SIZE = 1024
 CONFIDENCE_THRESHOLD = 2
 
