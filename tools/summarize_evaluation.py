@@ -149,7 +149,9 @@ def section_design(rows):
         s, n = by[best_s][t], by[best_n][t]
         oracle_s = max(stride_cfgs, key=lambda c: cov(by[c][t]))
         oracle_n = max(ngram_cfgs, key=lambda c: cov(by[c][t]))
-        if cov(n) > cov(s):
+        if cov(n) <= 0 and cov(s) <= 0:
+            winner = "neither (both harmful)"      # "least harmful" is not a win
+        elif cov(n) > cov(s):
             winner, wins_n = "n-gram", wins_n + 1
         elif cov(s) > cov(n):
             winner, wins_s = "stride", wins_s + 1
@@ -192,10 +194,11 @@ def section_design(rows):
     return (f"### Lookahead and multiple slots, at L2 with {lat}-access latency\n\n"
             "Best single configuration per family, chosen by mean coverage across all "
             f"workloads: **{ls}** and **{ln}**. Coverage (accuracy in brackets). The two "
-            "right-hand columns are an oracle upper bound — the best configuration for that "
-            "one workload — and are not achievable by any single design.\n\n"
+            "right-hand columns are an oracle upper bound - the best configuration for that "
+            "one workload - and are not achievable by any single design.\n\n"
             + table(["Workload", "Stride", "N-gram", "Winner", "Oracle stride", "Oracle n-gram"], body)
-            + f"\n\nThe n-gram configuration wins on {wins_n} workloads, stride on {wins_s}.\n\n"
+            + f"\n\nThe n-gram configuration wins on {wins_n} of {len(traces)} workloads, "
+            f"stride on {wins_s}; on the rest neither helps.\n\n"
             + "#### What lookahead buys (mean coverage)\n\n"
             + table(["", "Stride", f"N-gram (depth {ref['depth']}, {ref['slots']} slots)"], deg_rows)
             + "\n\n#### What extra slots buy (n-gram, depth "
@@ -215,6 +218,8 @@ def main():
             out.append(f"<!-- results/evaluation_{name}.csv not found -->\n")
             continue
         out.append(fn(rows))
+    # UTF-8 regardless of console code page, so redirected output is stable.
+    sys.stdout.reconfigure(encoding="utf-8")
     sys.stdout.write("\n".join(out))
     return 0
 
