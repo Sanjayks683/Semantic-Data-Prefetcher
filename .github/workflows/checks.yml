@@ -1,0 +1,35 @@
+# Runs the full verification suite for both configurations (v1 and v2):
+# RTL/model parameter sync, Python unit tests, the self-checking RTL testbench,
+# and RTL/model co-simulation on the synthetic traces.
+#
+# The real SPEC traces are ~1.1 GB and are deliberately not fetched here; the
+# real-workload results in the README are reproduced locally with
+# tools/fetch_traces.py and tools/run_champsim.py.
+
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+          iverilog -V 2>&1 | head -n 1
+
+      # --require-rtl: fail, rather than silently skip, if iverilog is missing.
+      - name: Run all checks (both profiles)
+        run: python tools/run_all_checks.py --require-rtl

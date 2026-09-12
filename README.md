@@ -1,8 +1,20 @@
 # Semantic Data Prefetcher (N-Gram Based)
 
-Hardware prefetcher that predicts irregular memory patterns like linked-list traversals and pointer chasing, where standard stride prefetchers completely fail.
+Hardware delta-correlation prefetcher aimed at irregular memory access — linked-list traversals and pointer chasing — which a stride prefetcher cannot learn.
 
 Built as a B.Tech capstone project. Has both a Python trace-driven cache simulator and a synthesizable SystemVerilog RTL design, with an automated check that the two are behaviourally equivalent.
+
+## At a glance
+
+| | Result |
+|---|---|
+| **Synthetic traces** (written for this project) | 45.59% coverage on pointer chasing at 100% accuracy, where stride gets 0% |
+| **Real SPEC CPU2017, as shipped** | **Fails** — 0.62% on mcf, 0.47% on omnetpp; stride wins both |
+| **Real SPEC, at L2, resized and depth-tuned** | **Beats stride on both**, at different settings: 61.48% on mcf (depth 2), 6.27% on omnetpp (depth 1), with a ~4 MB table. A single depth-1, 2.1 MB configuration beats stride on both (52.69% / 6.18%). |
+| **RTL vs Python model** | Equivalent on every access across 21M+ accesses, both configurations |
+| **Synthesis** (Xilinx 7-series, post-route) | ≈70 MHz; the 250 MHz target is **not** met |
+
+The short version: the design works on real code, but not in the configuration it was originally built with, and its coverage numbers are optimistic because prefetch latency is not modelled. Each of those is explained below.
 
 ---
 
@@ -17,7 +29,9 @@ while (node != NULL) {
     node = node->next;  // jumps to some random heap address
 }
 ```
-Each node sits at a random address decided by `malloc`. The deltas between nodes keep changing (+6, +7, -12, -1, ...), so stride prefetchers see no pattern and give up. On these workloads, they achieve literally 0% coverage.
+Each node sits at a random address decided by `malloc`. The deltas between nodes keep changing (+6, +7, -12, -1, ...), so stride prefetchers see no pattern and give up. On a pure linked-list traversal they get 0% coverage.
+
+In fairness to stride: real programs mix that kind of access with a great deal of regular traffic, which stride handles very well. On SPEC mcf it covers 69% of L1 misses. The irregular part is what is left over.
 
 ## The approach
 
@@ -97,9 +111,10 @@ over two real SPEC workloads from the DPC-3 ChampSim set — `605.mcf_s` and
 `620.omnetpp_s` — at 20,000,000 memory accesses each.
 
 ```bash
-python tools/run_champsim.py <trace.xz> --limit 20000000            # L1, as shipped
-python tools/run_champsim.py <trace.xz> --level l2                  # L2 placement
-python tools/sizing_sweep.py <trace.xz> --level l2                  # table/delta sweep
+python tools/fetch_traces.py                                        # ~1.1 GB, into traces/champsim/
+python tools/run_champsim.py traces/champsim/mcf.xz --limit 20000000   # L1, as shipped
+python tools/run_champsim.py traces/champsim/mcf.xz --level l2       # L2 placement
+python tools/sizing_sweep.py traces/champsim/mcf.xz --level l2       # table/delta/depth sweep
 ```
 
 ### As shipped (1,024 entries, 16-bit deltas, L1), it fails on both
@@ -371,6 +386,8 @@ Two ~58-bit ripple-carry adders in series with a deep asynchronous RAM read betw
 
 ## Known limitations
 
+- **Prefetch latency is not modelled, so every coverage figure in this README is optimistic.** A prefetched line is inserted into the cache the moment the prediction is made, and is usable on the very next access. In real hardware a prefetch has to travel to DRAM and back, which takes on the order of hundreds of cycles, so a prediction made only a few accesses before the data is needed arrives too late to help. Realistic evaluations count those as late prefetches and exclude them. This applies equally to both prefetchers and every configuration here, so *comparisons* between them are broadly fair, but the *absolute* coverage numbers overstate what hardware would achieve — and by how much has not been measured.
+
 - **Random access patterns** (crypto, hash tables with uniform distribution): no repeating sequences to learn, coverage drops to 0%. The confidence counter prevents bad guesses though — the RTL testbench measures 0 speculative prefetches across 200 irregular accesses.
 - **High branching factor** (BSTs with 50/50 left/right): a single predicted delta per entry means the counter oscillates and never reaches threshold.
 - **Cold start**: needs 3 accesses to fill the shift register plus 2 observations to build confidence. First pass through a new data structure is always blind.
@@ -414,6 +431,7 @@ rtl/
 
 tools/
   run_all_checks.py        - runs everything below for both profiles
+  fetch_traces.py          - download the SPEC traces into traces/champsim/
   run_champsim.py          - evaluate on a real ChampSim trace (L1 or L2)
   sizing_sweep.py          - sweep table size and delta width against a trace
   check_rtl_sync.py        - RTL/model parameter agreement
