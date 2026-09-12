@@ -17,3 +17,7 @@ clockInfo.txt
 
 # Real ChampSim traces (hundreds of MB each) - fetch with tools/fetch_traces.py
 traces/champsim/
+
+# Constraints derived by synth_vivado.tcl -period
+synthesis/reports/**/constraints_*ns.xdc
+synthesis/reports/constraints_*ns.xdc
