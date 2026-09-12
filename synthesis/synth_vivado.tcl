@@ -6,7 +6,12 @@
 #
 # Optional overrides:
 #     vivado -mode batch -source synthesis/synth_vivado.tcl -tclargs \
-#            -part xcku040-ffva1156-2-e -period 3.0 -no_route
+#            -profile v2 -part xcku040-ffva1156-2-e -no_route
+#
+#   -profile v1|v2   v1 (default) is the original 3-delta design and writes to
+#                    reports/. v2 builds the 2-delta variant with
+#                    -verilog_define NGRAM_V2 and writes to reports/v2/, so the
+#                    two sets of reports never overwrite each other.
 #
 # All paths are resolved relative to this script, and reports are written next
 # to it, so the working directory does not matter.
@@ -15,12 +20,12 @@
 set script_dir [file normalize [file dirname [info script]]]
 set repo_dir   [file dirname $script_dir]
 set rtl_dir    [file join $repo_dir rtl]
-set report_dir [file join $script_dir reports]
 
 # ------------------------------------------------------------------ options --
 set part        "xc7z020clg400-1"
 set clk_period  4.000
 set run_route   1
+set profile     "v1"
 
 if {![info exists argv]} { set argv {} }
 
@@ -28,13 +33,27 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
     switch -- [lindex $argv $i] {
         -part     { incr i; set part       [lindex $argv $i] }
         -period   { incr i; set clk_period [lindex $argv $i] }
+        -profile  { incr i; set profile    [lindex $argv $i] }
         -no_route { set run_route 0 }
         default   { puts "warning: ignoring unknown argument [lindex $argv $i]" }
     }
 }
 
+switch -- $profile {
+    v1 {
+        set define_args {}
+        set report_dir  [file join $script_dir reports]
+    }
+    v2 {
+        set define_args [list -verilog_define NGRAM_V2]
+        set report_dir  [file join $script_dir reports v2]
+    }
+    default { error "unknown -profile '$profile' (expected v1 or v2)" }
+}
+
 file mkdir $report_dir
 
+puts "\[SYNTH\] profile     : $profile"
 puts "\[SYNTH\] part        : $part"
 puts "\[SYNTH\] clk period  : $clk_period ns ([format %.1f [expr {1000.0 / $clk_period}]] MHz)"
 puts "\[SYNTH\] reports     : $report_dir"
@@ -72,7 +91,7 @@ if {![file exists $xdc]} {
 read_xdc [list $xdc]
 
 # ------------------------------------------------------------------ synth ---
-synth_design -top ngram_prefetcher -part $part -mode out_of_context
+synth_design -top ngram_prefetcher -part $part -mode out_of_context {*}$define_args
 
 # The XDC declares 250 MHz; a -period override replaces that clock definition.
 if {$clk_period != 4.000} {
