@@ -1,0 +1,4 @@
+workload,level,prefetcher,accesses,hits,misses,miss_rate,prefetches_generated,prefetches_filtered,prefetches_issued,useful_prefetches,accuracy,pollution,coverage
+omnetpp,L1,No-Prefetch,20000000,19233666,766334,3.8317,0,0,0,0,0.0,0.0,0.0
+omnetpp,L1,Stride,20000000,19255591,744409,3.722,1007187,964081,43106,25065,58.1474,41.8364,2.861
+omnetpp,L1,N-Gram,20000000,19237250,762750,3.8137,4518285,4512013,6272,3893,62.0695,37.9145,0.4677

@@ -3,3 +3,21 @@ __pycache__/
 *.out
 *.log
 .DS_Store
+
+# build artefacts
+build/
+.freebuff/
+
+# Vivado: keep the text reports as evidence, drop checkpoints and journals
+*.dcp
+*.jou
+*.str
+.Xil/
+clockInfo.txt
+
+# Real ChampSim traces (hundreds of MB each) - fetch with tools/fetch_traces.py
+traces/champsim/
+
+# Constraints derived by synth_vivado.tcl -period
+synthesis/reports/**/constraints_*ns.xdc
+synthesis/reports/constraints_*ns.xdc

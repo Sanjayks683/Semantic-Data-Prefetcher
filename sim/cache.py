@@ -1,4 +1,13 @@
-from config import CACHE_SETS, CACHE_WAYS, BLOCK_OFFSET_BITS, SET_INDEX_BITS
+"""
+cache.py - Set-associative cache model with true LRU replacement.
+
+Geometry defaults to the L1 configuration in config.py, but is parameterised so
+a second level can be instantiated alongside it (see tools/run_champsim.py
+--level l2). Tracks per-line prefetch provenance so the metrics layer can tell a
+demand hit on a prefetched line (a useful prefetch) from an ordinary hit.
+"""
+
+from config import CACHE_SETS, CACHE_WAYS, BLOCK_SIZE, _log2_exact
 
 
 class CacheLine:
@@ -11,14 +20,28 @@ class CacheLine:
 
 
 class Cache:
-    def __init__(self):
-        self.sets = [[CacheLine() for _ in range(CACHE_WAYS)] for _ in range(CACHE_SETS)]
+    def __init__(self, sets=CACHE_SETS, ways=CACHE_WAYS, block_size=BLOCK_SIZE):
+        self.num_sets = sets
+        self.num_ways = ways
+        self.block_size = block_size
+
+        self.block_offset_bits = _log2_exact(block_size, "block_size")
+        self.set_index_bits = _log2_exact(sets, "sets")
+
+        if ways <= 0:
+            raise ValueError(f"ways must be positive, got {ways}")
+
+        self.capacity_bytes = sets * ways * block_size
+
+        self.sets = [[CacheLine() for _ in range(ways)] for _ in range(sets)]
         self.global_lru = 0
+        # Prefetched lines evicted before any demand access ever used them.
+        self.dead_prefetch_evictions = 0
 
     def _decompose_address(self, addr):
-        block_addr = addr >> BLOCK_OFFSET_BITS
-        set_idx = block_addr & (CACHE_SETS - 1)
-        tag = block_addr >> SET_INDEX_BITS
+        block_addr = addr >> self.block_offset_bits
+        set_idx = block_addr & (self.num_sets - 1)
+        tag = block_addr >> self.set_index_bits
         return set_idx, tag
 
     def access(self, addr, is_prefetch=False):
@@ -59,6 +82,9 @@ class Cache:
 
         target_way = empty_way if empty_way is not None else victim_way
         evicted = target_way.valid
+
+        if evicted and target_way.is_prefetched and not target_way.was_useful:
+            self.dead_prefetch_evictions += 1
 
         target_way.valid = True
         target_way.tag = tag
