@@ -285,21 +285,26 @@ Four honest caveats on this table:
 The Python model and the RTL are two implementations of the same algorithm, so the project checks that they actually agree rather than assuming it.
 
 ```bash
-python tools/run_all_checks.py
+python tools/run_all_checks.py                # locally
+python tools/run_all_checks.py --require-rtl  # as CI runs it: fail if iverilog is missing
 ```
+
+Every check runs for **both configurations** (v1 and v2) — 11 steps in total — and the
+same suite runs on each pull request via GitHub Actions
+(`.github/workflows/checks.yml`).
 
 | Step | What it proves |
 |---|---|
 | `tools/check_rtl_sync.py` | `rtl/ngram_types_pkg.sv` and `sim/config.py` declare identical geometry, and the derived invariants hold |
 | `sim/test_cache.py` | 7 tests: LRU victim order, set isolation, prefetch-usefulness accounting, dead-prefetch counting |
-| `sim/test_prefetchers.py` | 12 tests: both prefetchers' learning and confidence behaviour, delta-overflow handling, both trace parsers |
-| `rtl/tb/tb_ngram_prefetcher.sv` | 65 assertions over 7 phases: cold start, learned cycle, same-index bypass, noise rejection, delta overflow, reset, retraining speed |
+| `sim/test_prefetchers.py` | 13 tests: both prefetchers' learning and confidence behaviour, delta-overflow handling, both trace parsers including records straddling a read-block boundary |
+| `rtl/tb/tb_ngram_prefetcher.sv` | 7 phases — cold start, learned cycle, same-index bypass, noise rejection, delta overflow, reset, retraining speed. 65 assertions for v1, 62 for v2 (some phases scale with the window depth) |
 | `tools/cosim_check.py` | Drives the RTL and the Python model with the same trace and diffs their prefetch streams access by access |
 | `synthesis/synth_vivado.tcl` | Synthesises and place-and-routes the design; reports real post-route timing, area and power |
 | `tools/run_champsim.py` | Evaluates against a real SPEC workload rather than the synthetic traces, at L1 or L2 |
 | `tools/sizing_sweep.py` | Sweeps table size and delta width on a real trace to locate the design point |
 
-The co-simulation is the one that matters most:
+The co-simulation is the one that matters most. For v1 on the synthetic traces:
 
 ```
   markov_semantic.trace      8000 accesses  model=4419   rtl=4419    agree=8000/8000  [MATCH]
@@ -308,7 +313,16 @@ The co-simulation is the one that matters most:
   streaming.trace            5000 accesses  model=4995   rtl=4995    agree=5000/5000  [MATCH]
 ```
 
-All 20,500 accesses produce identical prefetch decisions in both implementations, so the results table above describes the hardware and not just the model.
+v2 agrees on the same 20,500 accesses. The check has also been run against real
+data — 1,000,000 accesses of SPEC mcf with v1, agreeing on every one — which
+matters because that trace exercises the delta-overflow path 501,936 times,
+where the synthetic traces never exercise it at all:
+
+```bash
+python tools/cosim_check.py traces/champsim/mcf.xz --limit 1000000
+```
+
+So the results tables describe the hardware and not just the model.
 
 The RTL testbench fails on a real regression rather than only on a crash. Removing the read-during-write bypass in `sram_table.sv` makes phase 3 fail (`first prefetch at access 7, expected by access 5`), and reverting the confidence update rule makes phase 7 fail (`retrained at repetition 5, expected by repetition 4`).
 
@@ -456,7 +470,7 @@ rtl/
   confidence_fsm.sv        - 2-bit saturating counter
   ngram_prefetcher.sv      - top level
   tb/
-    tb_ngram_prefetcher.sv - self-checking testbench (65 assertions)
+    tb_ngram_prefetcher.sv - self-checking testbench (65 assertions v1, 62 v2)
     tb_cosim.sv            - trace-driven harness for co-simulation
 
 tools/

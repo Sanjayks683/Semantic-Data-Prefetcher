@@ -88,15 +88,34 @@ set xdc [file join $script_dir constraints.xdc]
 if {![file exists $xdc]} {
     error "missing constraints file: $xdc"
 }
+
+# A -period override must reach synthesis too. Redefining the clock after
+# synth_design would leave the netlist optimised for the XDC's 4.0 ns and only
+# *report* it against the new period. So derive a constraints file with the
+# requested period and read that instead - the same pre-synthesis ordering the
+# default run uses.
+if {$clk_period != 4.000} {
+    set fh [open $xdc r]
+    set text [read $fh]
+    close $fh
+
+    set hits [regsub -all {create_clock -period 4\.000} $text \
+              "create_clock -period $clk_period" text]
+    if {$hits != 1} {
+        error "expected exactly one 'create_clock -period 4.000' in $xdc, found $hits"
+    }
+
+    set xdc [file join $report_dir "constraints_${clk_period}ns.xdc"]
+    set fh [open $xdc w]
+    puts -nonewline $fh $text
+    close $fh
+    puts "\[SYNTH\] constraints : derived $xdc"
+}
+
 read_xdc [list $xdc]
 
 # ------------------------------------------------------------------ synth ---
 synth_design -top ngram_prefetcher -part $part -mode out_of_context {*}$define_args
-
-# The XDC declares 250 MHz; a -period override replaces that clock definition.
-if {$clk_period != 4.000} {
-    create_clock -period $clk_period -name clk [get_ports clk]
-}
 write_checkpoint -force [file join $report_dir post_synth.dcp]
 report_utilization -file [file join $report_dir post_synth_utilization.txt]
 report_timing_summary -file [file join $report_dir post_synth_timing.txt]
