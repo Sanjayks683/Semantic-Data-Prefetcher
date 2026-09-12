@@ -1,0 +1,4 @@
+workload,level,prefetcher,accesses,hits,misses,miss_rate,prefetches_generated,prefetches_filtered,prefetches_issued,useful_prefetches,accuracy,pollution,coverage
+mcf,L2,No-Prefetch,2011188,47783,1963405,97.6241,0,0,0,0,0.0,0.0,0.0
+mcf,L2,Stride,2011188,1073028,938160,46.6471,1032143,6253,1025890,1025252,99.9378,0.0616,52.2177
+mcf,L2,N-Gram,2011188,48659,1962529,97.5806,10269,9217,1052,828,78.7072,21.2928,0.0446

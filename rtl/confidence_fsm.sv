@@ -1,3 +1,18 @@
+// ============================================================================
+// confidence_fsm.sv - Saturating-counter update for one prediction table entry.
+//
+// Update rule (must stay identical to NGramPrefetcher.access in the model):
+//
+//   tag miss            -> claim the entry, install the observed delta, conf=1
+//   tag hit, predicted  -> conf = min(conf + 1, CONF_MAX)
+//   tag hit, mispredict  -> conf > 1 : keep the delta, conf = conf - 1
+//                           conf <= 1: install the observed delta, conf = 1
+//
+// The mispredict case decrements and tests for zero in the same step, so an
+// entry at conf=1 retrains immediately rather than spending an extra
+// observation sitting at conf=0.
+// ============================================================================
+
 `timescale 1ns / 1ps
 
 import ngram_types_pkg::*;
@@ -14,39 +29,33 @@ module confidence_fsm (
     wire signed [DELTA_WIDTH-1:0] entry_delta = current_entry.pred_delta;
     wire [CONF_BITS-1:0]          entry_conf  = current_entry.conf;
 
-    reg                          next_valid;
-    reg [TAG_BITS-1:0]           next_tag;
-    reg signed [DELTA_WIDTH-1:0] next_delta;
-    reg [CONF_BITS-1:0]          next_conf;
+    wire tag_hit    = entry_valid && (entry_tag == expected_tag);
+    wire predicted  = (entry_delta == actual_delta);
 
-    always @(*) begin
-        if (entry_valid && (entry_tag == expected_tag)) begin
-            if (entry_delta == actual_delta) begin
-                next_valid = 1'b1;
-                next_tag   = expected_tag;
-                next_delta = actual_delta;
-                if (entry_conf < CONF_STRONGLY_LIKELY)
-                    next_conf = entry_conf + 1'b1;
-                else
-                    next_conf = CONF_STRONGLY_LIKELY;
-            end else begin
-                if (entry_conf > CONF_STRONGLY_UNLIKELY) begin
-                    next_valid = 1'b1;
-                    next_tag   = entry_tag;
-                    next_delta = entry_delta;
-                    next_conf  = entry_conf - 1'b1;
-                end else begin
-                    next_valid = 1'b1;
-                    next_tag   = expected_tag;
-                    next_delta = actual_delta;
-                    next_conf  = CONF_WEAKLY_UNLIKELY;
-                end
+    logic                          next_valid;
+    logic [TAG_BITS-1:0]           next_tag;
+    logic signed [DELTA_WIDTH-1:0] next_delta;
+    logic [CONF_BITS-1:0]          next_conf;
+
+    always_comb begin
+        next_valid = 1'b1;
+        next_tag   = expected_tag;
+        next_delta = actual_delta;
+        next_conf  = CONF_WEAKLY_UNLIKELY;
+
+        if (tag_hit) begin
+            if (predicted) begin
+                next_delta = entry_delta;
+                next_conf  = (entry_conf < CONF_MAX[CONF_BITS-1:0])
+                           ? (entry_conf + 1'b1)
+                           : CONF_MAX[CONF_BITS-1:0];
+            end else if (entry_conf > CONF_WEAKLY_UNLIKELY) begin
+                // Still confident enough to keep the existing prediction.
+                next_tag   = entry_tag;
+                next_delta = entry_delta;
+                next_conf  = entry_conf - 1'b1;
             end
-        end else begin
-            next_valid = 1'b1;
-            next_tag   = expected_tag;
-            next_delta = actual_delta;
-            next_conf  = CONF_WEAKLY_UNLIKELY;
+            // else: fall through to the defaults, retraining on actual_delta.
         end
     end
 
