@@ -18,6 +18,7 @@ Definitions used throughout (stated explicitly because "accuracy" and
 
   accuracy    = useful / issued      (late prefetches count against it)
   coverage    = (baseline_misses - misses) / baseline_misses
+                negative when prefetching increases misses (pollution)
 """
 
 
@@ -79,10 +80,15 @@ class Metrics:
         return (self.dead_prefetches / self.prefetches_issued * 100.0) if self.prefetches_issued > 0 else 0.0
 
     def compute_coverage(self, baseline_misses):
+        """Share of baseline misses removed. Negative when prefetching made it worse.
+
+        This used to be clamped at zero, which reported a prefetcher that
+        tripled the miss count as merely ineffective (0.00%). On real traces
+        that happens often enough to matter, so the sign is kept.
+        """
         if baseline_misses == 0:
             return 0.0
-        reduction = max(0, baseline_misses - self.misses)
-        return (reduction / baseline_misses) * 100.0
+        return ((baseline_misses - self.misses) / baseline_misses) * 100.0
 
     def print_summary(self, baseline_misses=None):
         print(f"\n=======================================================")
