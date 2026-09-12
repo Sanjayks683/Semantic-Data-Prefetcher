@@ -14,3 +14,6 @@ build/
 *.str
 .Xil/
 clockInfo.txt
+
+# Real ChampSim traces (hundreds of MB each) - fetch with tools/fetch_traces.py
+traces/champsim/

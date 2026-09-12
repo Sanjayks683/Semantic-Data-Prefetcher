@@ -51,6 +51,12 @@ def have_iverilog():
 
 
 def main():
+    # --require-rtl turns a missing Icarus install into a failure. Without it a
+    # machine lacking iverilog skips the RTL checks and still reports success,
+    # which is convenient locally but would let CI go green having verified no
+    # RTL at all.
+    require_rtl = "--require-rtl" in sys.argv[1:]
+
     py = sys.executable
     results = []
 
@@ -75,6 +81,8 @@ def main():
         print("  SKIPPED: RTL testbench and co-simulation")
         print("  Icarus Verilog (iverilog / vvp) is not on PATH.")
         print(f"{'=' * 78}")
+        if require_rtl:
+            results.append(("iverilog present (--require-rtl)", False))
     else:
         build = os.path.join(REPO, "build")
         os.makedirs(build, exist_ok=True)
