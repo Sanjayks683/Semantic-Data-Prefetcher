@@ -12,7 +12,7 @@ Built as a B.Tech capstone project. Has both a Python trace-driven cache simulat
 | **Real SPEC CPU2017, as shipped** | **Fails** — 0.62% on mcf, 0.47% on omnetpp; stride wins both |
 | **Real SPEC, at L2, resized and depth-tuned** | **Beats stride on both**, at different settings: 61.48% on mcf (depth 2), 6.27% on omnetpp (depth 1), with a ~4 MB table. A single depth-1, 2.1 MB configuration beats stride on both (52.69% / 6.18%). |
 | **RTL vs Python model** | Equivalent on every access across 21M+ accesses, both configurations |
-| **Synthesis** (Xilinx 7-series, post-route) | ≈70 MHz; the 250 MHz target is **not** met |
+| **Synthesis** (Xilinx 7-series, post-route) | ≈70 MHz for both configurations; the 250 MHz target is **not** met. v2 is 10.5% smaller. |
 
 The short version: the design works on real code, but not in the configuration it was originally built with, and its coverage numbers are optimistic because prefetch latency is not modelled. Each of those is explained below.
 
@@ -382,6 +382,36 @@ Two ~58-bit ripple-carry adders in series with a deep asynchronous RAM read betw
 
 **This is architectural, not a bug.** The design is genuinely single-cycle — one access in, one prefetch decision out, same cycle — and that is exactly why it is slow. Reaching a realistic L1 clock would mean pipelining it into 3–4 stages, keeping one access per cycle of throughput while allowing several cycles of latency. That is a reasonable trade for a prefetcher, which sits off the demand-critical path and only needs its prediction to arrive before the data is used. **That pipelining is not implemented** — the numbers above are for the single-cycle design as it stands.
 
+### v2 synthesis
+
+The 2-delta configuration (`-tclargs -profile v2`), same part, tool and
+constraints. Reports are in [`synthesis/reports/v2/`](synthesis/reports/v2/).
+
+| Post-route | v1 (3-delta) | v2 (2-delta) | Δ |
+|---|---:|---:|---:|
+| Slice LUTs | 2,289 | **2,049** | −240 (−10.5%) |
+|   — as logic | 1,777 | 1,537 | −240 |
+|   — as distributed RAM | 512 | 512 | 0 |
+| Registers | 1,184 | **1,167** | −17 |
+| Slices | 693 | 625 | −68 |
+| Total on-chip power | 0.174 W | 0.175 W | ~0 |
+| WNS at 4.0 ns | −10.381 ns | −10.613 ns | −0.232 |
+| Fastest period met | **15.0 ns** (66.7 MHz) | **16.0 ns** (62.5 MHz) | one step slower |
+
+v2 is **10.5% smaller**. The 17-register saving is consistent with dropping one
+16-bit history register; the table itself is unchanged, so distributed RAM is
+identical.
+
+It is **not faster**, and in this run it closed timing one sweep step later than
+v1 — v2 missed 15.0 ns by 0.180 ns where v1 met it by 0.175 ns. The critical path
+is the same wide-adder chain in both (28 CARRY4 stages in v1, 27 in v2), so
+removing a hash tap does not touch it, and a difference of this size is more
+likely placement variation than architecture. But that is an inference: the
+measured result is that v2 closes at 16.0 ns, and that is what is reported here.
+
+The practical reading: v2 buys coverage and area at no meaningful timing cost,
+and neither configuration is anywhere near 250 MHz.
+
 ---
 
 ## Known limitations
@@ -439,9 +469,10 @@ tools/
 
 synthesis/
   synth_vivado.tcl         - synthesis + place & route
-  fmax_sweep.tcl           - implements at several periods to find real Fmax
+  fmax_sweep.tcl           - implements at several periods to find real Fmax (-profile v1|v2)
   constraints.xdc          - timing constraints (read before synthesis)
-  reports/                 - measured utilisation, timing, power, Fmax sweep
+  reports/                 - measured utilisation, timing, power, Fmax sweep (v1)
+  reports/v2/              - the same, for the 2-delta configuration
 
 results/                   - CSV + plots
 traces/                    - generated workload traces

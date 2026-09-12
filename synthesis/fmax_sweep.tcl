@@ -3,6 +3,10 @@
 # design at several target periods and recording post-route slack.
 #
 #     vivado -mode batch -source synthesis/fmax_sweep.tcl
+#     vivado -mode batch -source synthesis/fmax_sweep.tcl -tclargs -profile v2 -periods "4 14 15"
+#
+# -profile v2 builds the 2-delta variant (-verilog_define NGRAM_V2) and writes
+# its checkpoint under reports/v2/, leaving the v1 results untouched.
 #
 # Extrapolating Fmax from a single badly-failing run is unreliable: the tool
 # gives up differently when the target is far out of reach, and routing changes
@@ -13,12 +17,34 @@
 set script_dir [file normalize [file dirname [info script]]]
 set repo_dir   [file dirname $script_dir]
 set rtl_dir    [file join $repo_dir rtl]
-set report_dir [file join $script_dir reports]
 
 set part    "xc7z020clg400-1"
 set periods {4.0 8.0 12.0 14.0 15.0 16.0}
+set profile "v1"
+
+if {![info exists argv]} { set argv {} }
+for {set i 0} {$i < [llength $argv]} {incr i} {
+    switch -- [lindex $argv $i] {
+        -profile { incr i; set profile [lindex $argv $i] }
+        -periods { incr i; set periods [lindex $argv $i] }
+        default  { puts "warning: ignoring unknown argument [lindex $argv $i]" }
+    }
+}
+
+switch -- $profile {
+    v1 {
+        set define_args {}
+        set report_dir  [file join $script_dir reports]
+    }
+    v2 {
+        set define_args [list -verilog_define NGRAM_V2]
+        set report_dir  [file join $script_dir reports v2]
+    }
+    default { error "unknown -profile '$profile' (expected v1 or v2)" }
+}
 
 file mkdir $report_dir
+puts "\[SWEEP\] profile $profile, periods $periods"
 
 set sources {
     ngram_types_pkg.sv delta_generator.sv history_shift_reg.sv
@@ -31,7 +57,7 @@ foreach f $sources {
 }
 read_xdc [list [file join $script_dir constraints.xdc]]
 
-synth_design -top ngram_prefetcher -part $part -mode out_of_context
+synth_design -top ngram_prefetcher -part $part -mode out_of_context {*}$define_args
 set synth_dcp [file join $report_dir sweep_post_synth.dcp]
 write_checkpoint -force $synth_dcp
 
