@@ -7,6 +7,8 @@
 #
 # -profile v2 builds the 2-delta variant (-verilog_define NGRAM_V2) and writes
 # its checkpoint under reports/v2/, leaving the v1 results untouched.
+# -core pipe sweeps the pipelined ngram_prefetcher_pipe instead, under
+# reports/pipe/ (or reports/pipe/v2/).
 #
 # Extrapolating Fmax from a single badly-failing run is unreliable: the tool
 # gives up differently when the target is far out of reach, and routing changes
@@ -21,34 +23,39 @@ set rtl_dir    [file join $repo_dir rtl]
 set part    "xc7z020clg400-1"
 set periods {4.0 8.0 12.0 14.0 15.0 16.0}
 set profile "v1"
+set core    "comb"
 
 if {![info exists argv]} { set argv {} }
 for {set i 0} {$i < [llength $argv]} {incr i} {
     switch -- [lindex $argv $i] {
         -profile { incr i; set profile [lindex $argv $i] }
+        -core    { incr i; set core    [lindex $argv $i] }
         -periods { incr i; set periods [lindex $argv $i] }
         default  { puts "warning: ignoring unknown argument [lindex $argv $i]" }
     }
 }
 
+set report_dir [file join $script_dir reports]
+
+switch -- $core {
+    comb    { set top ngram_prefetcher }
+    pipe    { set top ngram_prefetcher_pipe; set report_dir [file join $report_dir pipe] }
+    default { error "unknown -core '$core' (expected comb or pipe)" }
+}
+
 switch -- $profile {
-    v1 {
-        set define_args {}
-        set report_dir  [file join $script_dir reports]
-    }
-    v2 {
-        set define_args [list -verilog_define NGRAM_V2]
-        set report_dir  [file join $script_dir reports v2]
-    }
+    v1      { set define_args {} }
+    v2      { set define_args [list -verilog_define NGRAM_V2]; set report_dir [file join $report_dir v2] }
     default { error "unknown -profile '$profile' (expected v1 or v2)" }
 }
 
 file mkdir $report_dir
-puts "\[SWEEP\] profile $profile, periods $periods"
+puts "\[SWEEP\] core $core ($top), profile $profile, periods $periods"
 
 set sources {
     ngram_types_pkg.sv delta_generator.sv history_shift_reg.sv
     xor_hash.sv sram_table.sv confidence_fsm.sv ngram_prefetcher.sv
+    ngram_prefetcher_pipe.sv
 }
 
 create_project -in_memory -part $part
@@ -57,7 +64,7 @@ foreach f $sources {
 }
 read_xdc [list [file join $script_dir constraints.xdc]]
 
-synth_design -top ngram_prefetcher -part $part -mode out_of_context {*}$define_args
+synth_design -top $top -part $part -mode out_of_context {*}$define_args
 set synth_dcp [file join $report_dir sweep_post_synth.dcp]
 write_checkpoint -force $synth_dcp
 
@@ -70,8 +77,8 @@ foreach p $periods {
     # Replace the clock definition with this iteration's target, keeping the
     # same I/O budget the XDC declares.
     create_clock -period $p -name clk [get_ports clk]
-    set_input_delay  -clock clk 1.000 [get_ports {rst mem_valid mem_addr_in[*]}]
-    set_output_delay -clock clk 1.000 [get_ports {prefetch_valid prefetch_addr_out[*] delta_overflow}]
+    set_input_delay  -clock clk 1.000 [get_ports -filter {DIRECTION == IN && NAME != clk}]
+    set_output_delay -clock clk 1.000 [get_ports -filter {DIRECTION == OUT}]
     set_false_path -from [get_ports rst]
 
     opt_design -quiet

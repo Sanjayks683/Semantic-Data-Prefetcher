@@ -42,6 +42,7 @@ RTL_SOURCES = [
     "sram_table.sv",
     "confidence_fsm.sv",
     "ngram_prefetcher.sv",
+    "ngram_prefetcher_pipe.sv",
     os.path.join("tb", "tb_cosim.sv"),
 ]
 
@@ -61,12 +62,16 @@ def require_tools():
         sys.exit(2)
 
 
+CORE = "comb"   # set from --core in main()
+
+
 def build(workdir):
     out = os.path.join(workdir, "cosim.out")
     if PROFILE not in VERILOG_DEFINES:
         print(f"error: unknown NGRAM_PROFILE={PROFILE!r}")
         sys.exit(2)
-    cmd = ["iverilog", "-g2012"] + VERILOG_DEFINES[PROFILE] + ["-o", out] + [
+    defines = VERILOG_DEFINES[PROFILE] + (["-DNGRAM_PIPE"] if CORE == "pipe" else [])
+    cmd = ["iverilog", "-g2012"] + defines + ["-o", out] + [
         os.path.join(RTL_DIR, s) for s in RTL_SOURCES
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -152,7 +157,11 @@ def main(argv):
     ap.add_argument("traces", nargs="*")
     ap.add_argument("--limit", type=int, default=None,
                     help="cap the number of accesses (for very large real traces)")
+    ap.add_argument("--core", choices=("comb", "pipe"), default="comb",
+                    help="comb: single-cycle ngram_prefetcher; pipe: ngram_prefetcher_pipe")
     args = ap.parse_args(argv)
+    global CORE
+    CORE = args.core
     argv = args.traces
     limit = args.limit
 
@@ -174,37 +183,49 @@ def main(argv):
         print("error: no traces found. Run 'python sim/generate_trace.py' first.")
         return 2
 
-    print("\nRTL / model co-simulation")
+    print(f"\nRTL / model co-simulation  [profile {PROFILE}, core {CORE}]")
     print("=" * 78)
 
-    all_ok = True
+    diverged = []
+    missing = []
     with tempfile.TemporaryDirectory() as workdir:
         binary = build(workdir)
 
         for t in traces:
-            path = t if os.path.isabs(t) else os.path.join(TRACES_DIR, t)
-            if not os.path.exists(path):
-                print(f"  {t}: not found")
-                all_ok = False
+            # Accept a path as given (absolute, or relative to the current
+            # directory, e.g. traces/champsim/mcf.xz), or a bare name inside
+            # traces/ (e.g. streaming.trace).
+            candidates = [t, os.path.join(TRACES_DIR, t)]
+            path = next((c for c in candidates if os.path.exists(c)), None)
+            if path is None:
+                print(f"  {t}: not found (looked in {', '.join(candidates)})")
+                missing.append(t)
                 continue
 
             accesses = sum(1 for _ in stream(path, limit))
             model, model_obj = run_model(path, limit)
             rtl = run_rtl(binary, path, workdir, limit)
 
-            ok = compare(os.path.basename(t), model, rtl, accesses)
+            if not compare(os.path.basename(t), model, rtl, accesses):
+                diverged.append(t)
             if model_obj.delta_overflows:
                 print(f"      note: {model_obj.delta_overflows} delta overflow(s) "
                       f"on this trace")
-            all_ok &= ok
 
     print("=" * 78)
-    if all_ok:
-        print("RESULT: RTL and model agree on every access.\n")
-        return 0
+    # A missing trace is not a divergence - nothing was compared - and must not
+    # be reported as one, but it is still a failure: the check did not happen.
+    if missing:
+        print(f"RESULT: {len(missing)} trace(s) not found, so not checked: {missing}")
+    if diverged:
+        print(f"RESULT: divergence detected on {diverged}.\n")
+        return 1
+    if missing:
+        print()
+        return 2
 
-    print("RESULT: divergence detected.\n")
-    return 1
+    print("RESULT: RTL and model agree on every access.\n")
+    return 0
 
 
 if __name__ == "__main__":

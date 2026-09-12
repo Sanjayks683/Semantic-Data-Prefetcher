@@ -13,6 +13,10 @@
 #                    -verilog_define NGRAM_V2 and writes to reports/v2/, so the
 #                    two sets of reports never overwrite each other.
 #
+#   -core comb|pipe  comb (default) is the single-cycle ngram_prefetcher.
+#                    pipe is ngram_prefetcher_pipe, the 5-stage version, and
+#                    writes to reports/pipe/ (or reports/pipe/v2/).
+#
 # All paths are resolved relative to this script, and reports are written next
 # to it, so the working directory does not matter.
 # ==============================================================================
@@ -26,6 +30,7 @@ set part        "xc7z020clg400-1"
 set clk_period  4.000
 set run_route   1
 set profile     "v1"
+set core        "comb"
 
 if {![info exists argv]} { set argv {} }
 
@@ -34,25 +39,29 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
         -part     { incr i; set part       [lindex $argv $i] }
         -period   { incr i; set clk_period [lindex $argv $i] }
         -profile  { incr i; set profile    [lindex $argv $i] }
+        -core     { incr i; set core       [lindex $argv $i] }
         -no_route { set run_route 0 }
         default   { puts "warning: ignoring unknown argument [lindex $argv $i]" }
     }
 }
 
+set report_dir [file join $script_dir reports]
+
+switch -- $core {
+    comb    { set top ngram_prefetcher }
+    pipe    { set top ngram_prefetcher_pipe; set report_dir [file join $report_dir pipe] }
+    default { error "unknown -core '$core' (expected comb or pipe)" }
+}
+
 switch -- $profile {
-    v1 {
-        set define_args {}
-        set report_dir  [file join $script_dir reports]
-    }
-    v2 {
-        set define_args [list -verilog_define NGRAM_V2]
-        set report_dir  [file join $script_dir reports v2]
-    }
+    v1      { set define_args {} }
+    v2      { set define_args [list -verilog_define NGRAM_V2]; set report_dir [file join $report_dir v2] }
     default { error "unknown -profile '$profile' (expected v1 or v2)" }
 }
 
 file mkdir $report_dir
 
+puts "\[SYNTH\] core        : $core ($top)"
 puts "\[SYNTH\] profile     : $profile"
 puts "\[SYNTH\] part        : $part"
 puts "\[SYNTH\] clk period  : $clk_period ns ([format %.1f [expr {1000.0 / $clk_period}]] MHz)"
@@ -70,6 +79,7 @@ set sources {
     sram_table.sv
     confidence_fsm.sv
     ngram_prefetcher.sv
+    ngram_prefetcher_pipe.sv
 }
 
 foreach f $sources {
@@ -115,7 +125,7 @@ if {$clk_period != 4.000} {
 read_xdc [list $xdc]
 
 # ------------------------------------------------------------------ synth ---
-synth_design -top ngram_prefetcher -part $part -mode out_of_context {*}$define_args
+synth_design -top $top -part $part -mode out_of_context {*}$define_args
 write_checkpoint -force [file join $report_dir post_synth.dcp]
 report_utilization -file [file join $report_dir post_synth_utilization.txt]
 report_timing_summary -file [file join $report_dir post_synth_timing.txt]
