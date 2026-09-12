@@ -12,8 +12,11 @@ Definitions used throughout (stated explicitly because "accuracy" and
                 for accuracy
   useful      - issued prefetches later hit by a demand access before eviction
   dead        - issued prefetches evicted without ever being used (pollution)
+  late        - issued prefetches still in flight when a demand request for the
+                same block arrived; they cost bandwidth and helped nobody. Only
+                non-zero when prefetch latency is modelled (sim/simulator.py)
 
-  accuracy    = useful / issued
+  accuracy    = useful / issued      (late prefetches count against it)
   coverage    = (baseline_misses - misses) / baseline_misses
 """
 
@@ -30,6 +33,7 @@ class Metrics:
         self.useful_prefetches = 0
         self.evictions = 0
         self.dead_prefetches = 0
+        self.late_prefetches = 0
 
     def record_access(self, hit, is_useful_prefetch):
         self.total_accesses += 1
@@ -63,6 +67,11 @@ class Metrics:
     @property
     def accuracy(self):
         return (self.useful_prefetches / self.prefetches_issued * 100.0) if self.prefetches_issued > 0 else 0.0
+
+    @property
+    def late_rate(self):
+        """Share of issued prefetches that arrived after the demand request."""
+        return (self.late_prefetches / self.prefetches_issued * 100.0) if self.prefetches_issued > 0 else 0.0
 
     @property
     def pollution_rate(self):

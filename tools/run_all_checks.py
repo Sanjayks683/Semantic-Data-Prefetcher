@@ -70,6 +70,10 @@ def main():
         "2/4a Python unit tests - cache",
         [py, "test_cache.py"], cwd=SIM)))
 
+    results.append(("simulator tests", run(
+        "2/4a Python unit tests - shared simulator and latency model",
+        [py, "test_simulator.py"], cwd=SIM)))
+
     for prof in PROFILES:
         results.append((f"prefetcher tests [{prof}]", run(
             f"2/4b Python unit tests - prefetchers and parsers  (profile {prof})",
