@@ -24,6 +24,8 @@ Usage:
     --limit    stop after N memory accesses (default 10,000,000)
     --l2-sets  L2 sets, must be a power of two (default 512 -> 256 KB 8-way)
     --l2-ways  L2 associativity (default 8)
+    --latency  accesses a prefetch spends in flight before it can be used
+               (default 0, the original instant-arrival model)
 
 All configurations see the same access stream from the same starting point, so
 cold-start effects are identical across them and the comparison is fair even
@@ -42,10 +44,9 @@ from array import array
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "sim"))
 
-from cache import Cache                                    # noqa: E402
 from stride_prefetcher import StridePrefetcher             # noqa: E402
 from ngram_prefetcher import NGramPrefetcher               # noqa: E402
-from metrics import Metrics                                # noqa: E402
+from simulator import simulate                             # noqa: E402
 from trace_parser import get_trace_iterator                # noqa: E402
 from config import CACHE_SETS, CACHE_WAYS, BLOCK_SIZE      # noqa: E402
 
@@ -58,79 +59,6 @@ def build(kind):
     if kind == "none":
         return None
     raise ValueError(kind)
-
-
-def offer_prefetch(cache, m, pf, ip, addr):
-    """Let the predictor see one access and place any candidate into `cache`."""
-    if pf is None:
-        return
-    cand = pf.access(ip, addr)
-    if cand is None:
-        return
-    m.record_prefetch_generated()
-    resident, _ = cache.access(cand, is_prefetch=True)
-    if resident:
-        m.record_prefetch_filtered()
-    else:
-        m.record_prefetch(cache.insert(cand, is_prefetch=True))
-
-
-def simulate_l1(ips, addrs, kind):
-    """Prefetcher sees every access and fills L1."""
-    l1 = Cache()
-    m = Metrics(name=kind.upper())
-    pf = build(kind)
-
-    for ip, addr in zip(ips, addrs):
-        hit, useful = l1.access(addr, is_prefetch=False)
-        m.record_access(hit, useful)
-        if not hit:
-            l1.insert(addr, is_prefetch=False)
-        offer_prefetch(l1, m, pf, ip, addr)
-
-    m.dead_prefetches = l1.dead_prefetch_evictions
-    if pf is not None and hasattr(pf, "delta_overflows"):
-        m.delta_overflows = pf.delta_overflows
-    return m
-
-
-def simulate_l2(ips, addrs, kind, l2_sets, l2_ways):
-    """Unprefetched L1 in front; prefetcher sees L1 misses and fills L2.
-
-    Metrics are reported with respect to L2: total_accesses is the number of L1
-    misses that reached L2, and misses are the requests that then went to
-    memory. Coverage therefore measures reduction in memory traffic, which is
-    what an L2 prefetcher exists to do.
-    """
-    l1 = Cache()
-    l2 = Cache(sets=l2_sets, ways=l2_ways)
-    m = Metrics(name=kind.upper())
-    pf = build(kind)
-
-    l1_hits = 0
-
-    for ip, addr in zip(ips, addrs):
-        l1_hit, _ = l1.access(addr, is_prefetch=False)
-        if l1_hit:
-            l1_hits += 1
-            continue
-
-        # L1 miss: fill L1, and the request proceeds to L2.
-        l1.insert(addr, is_prefetch=False)
-
-        l2_hit, useful = l2.access(addr, is_prefetch=False)
-        m.record_access(l2_hit, useful)
-        if not l2_hit:
-            l2.insert(addr, is_prefetch=False)
-
-        # The predictor is trained on, and predicts from, the L1 miss stream.
-        offer_prefetch(l2, m, pf, ip, addr)
-
-    m.dead_prefetches = l2.dead_prefetch_evictions
-    m.l1_hits = l1_hits
-    if pf is not None and hasattr(pf, "delta_overflows"):
-        m.delta_overflows = pf.delta_overflows
-    return m
 
 
 def load(trace, limit):
@@ -164,6 +92,8 @@ def main():
     ap.add_argument("--level", choices=("l1", "l2"), default="l1")
     ap.add_argument("--l2-sets", type=int, default=512)
     ap.add_argument("--l2-ways", type=int, default=8)
+    ap.add_argument("--latency", type=int, default=0,
+                    help="prefetch arrival delay in memory accesses (0 = instant)")
     ap.add_argument("--csv")
     args = ap.parse_args()
 
@@ -184,10 +114,10 @@ def main():
     results = {}
     for kind in ("none", "stride", "ngram"):
         t0 = time.time()
-        if args.level == "l1":
-            results[kind] = simulate_l1(ips, addrs, kind)
-        else:
-            results[kind] = simulate_l2(ips, addrs, kind, args.l2_sets, args.l2_ways)
+        results[kind] = simulate(zip(ips, addrs), prefetcher=build(kind),
+                                 level=args.level, latency=args.latency,
+                                 l2_sets=args.l2_sets, l2_ways=args.l2_ways,
+                                 name=kind.upper())
         print(f"  {kind:<7} done ({time.time()-t0:.0f}s)", flush=True)
 
     base = results["none"].misses
@@ -201,6 +131,8 @@ def main():
         print(f"   Prefetching into L1: {l1_kb} KB, {CACHE_WAYS}-way, "
               f"{CACHE_SETS} sets, {BLOCK_SIZE} B lines")
         print(f"   {n_acc:,} memory accesses, {unique_ips:,} distinct IPs")
+        if args.latency:
+            print(f"   prefetch latency: {args.latency} accesses")
     else:
         print(f"   L1 {l1_kb} KB (no prefetcher)  ->  "
               f"prefetching into L2 {l2_kb} KB, {args.l2_ways}-way")
@@ -221,6 +153,8 @@ def main():
     print(f"{'Useful Prefetches':<25} | {'N/A':<14} | {s.useful_prefetches:<14,d} | {g.useful_prefetches:<14,d}")
     print(f"{'Prefetch Accuracy (%)':<25} | {'N/A':<14} | {s.accuracy:<13.2f}% | {g.accuracy:<13.2f}%")
     print(f"{'Cache Pollution (%)':<25} | {'N/A':<14} | {s.pollution_rate:<13.2f}% | {g.pollution_rate:<13.2f}%")
+    if args.latency:
+        print(f"{'Late Prefetches (%)':<25} | {'N/A':<14} | {s.late_rate:<13.2f}% | {g.late_rate:<13.2f}%")
     print(f"{'Prefetch Coverage (%)':<25} | {'0.00':<13}% | {s.compute_coverage(base):<13.2f}% | {g.compute_coverage(base):<13.2f}%")
     print("-" * 75)
     if hasattr(g, "delta_overflows"):

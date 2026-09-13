@@ -6,10 +6,9 @@ main.py - Runs every trace in traces/ through the three cache configurations
 import os
 import sys
 import csv
-from cache import Cache
 from stride_prefetcher import StridePrefetcher
 from ngram_prefetcher import NGramPrefetcher
-from metrics import Metrics
+from simulator import simulate
 from trace_parser import get_trace_iterator
 from config import (CACHE_SETS, CACHE_WAYS, BLOCK_SIZE,
                     CACHE_CAPACITY_BYTES, NGRAM_DEPTH, PROFILE)
@@ -36,32 +35,9 @@ def build_prefetcher(prefetcher_type):
 
 
 def run_simulation(trace_path, prefetcher_type="none"):
-    cache = Cache()
-    metrics = Metrics(name=prefetcher_type.upper())
-    prefetcher = build_prefetcher(prefetcher_type)
-
-    for ip, addr in get_trace_iterator(trace_path):
-        hit, is_useful = cache.access(addr, is_prefetch=False)
-        metrics.record_access(hit, is_useful)
-
-        if not hit:
-            cache.insert(addr, is_prefetch=False)
-
-        if prefetcher is not None:
-            prefetch_addr = prefetcher.access(ip, addr)
-            if prefetch_addr is not None:
-                metrics.record_prefetch_generated()
-                already_in_cache, _ = cache.access(prefetch_addr, is_prefetch=True)
-                if already_in_cache:
-                    # Redundant: costs no bandwidth, so it is not an issued
-                    # prefetch and must not dilute the accuracy denominator.
-                    metrics.record_prefetch_filtered()
-                else:
-                    evicted = cache.insert(prefetch_addr, is_prefetch=True)
-                    metrics.record_prefetch(evicted)
-
-    metrics.dead_prefetches = cache.dead_prefetch_evictions
-    return metrics
+    return simulate(get_trace_iterator(trace_path),
+                    prefetcher=build_prefetcher(prefetcher_type),
+                    name=prefetcher_type.upper())
 
 
 def run_all_benchmarks():

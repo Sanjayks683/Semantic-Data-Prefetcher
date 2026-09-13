@@ -103,7 +103,7 @@ def test_ngram_confidence_saturates():
     for i in range(40):
         p.access(IP, 0x3000 + i * BLOCK_SIZE)
 
-    confidences = [e.confidence for e in p.table if e.valid]
+    confidences = p.occupied_confidences()
     assert confidences, "a learned stream must populate the table"
     assert max(confidences) == CONF_MAX, (
         f"confidence must saturate at {CONF_MAX}, got {max(confidences)}"
@@ -245,6 +245,186 @@ def test_champsim_parser_spans_read_boundaries():
     )
     assert rows[0] == (0x400000, 0xA000)
     assert rows[-1] == (0x400000 + count - 1, 0xD000 + count - 1)
+
+
+# ------------------------------------------------ lookahead and multi-slot --
+
+def _stream_from_deltas(deltas, reps, base_block=0x4000):
+    """Accesses whose block deltas repeat the given cycle `reps` times."""
+    block = base_block
+    out = [(IP, block * BLOCK_SIZE)]
+    for _ in range(reps):
+        for d in deltas:
+            block += d
+            out.append((IP, block * BLOCK_SIZE))
+    return out
+
+
+def test_single_slot_cannot_learn_a_branch_but_two_slots_can():
+    """A window followed alternately by two deltas defeats one confidence counter."""
+    cycle = [1, 5, 1, 9]          # after a +1, the next delta is +5 or +9 in turn
+
+    def followers_after_plus_one(slots):
+        p = NGramPrefetcher(depth=1, slots=slots)
+        found = set()
+        stream = _stream_from_deltas(cycle, 30)
+        prev = None
+        for i, (ip, addr) in enumerate(stream):
+            cands = p.access_all(ip, addr)
+            block = addr >> 6
+            if prev is not None and block - prev == 1 and i > 40:
+                found |= {(c >> 6) - block for c in cands}
+            prev = block
+        return found
+
+    assert followers_after_plus_one(1) == set(), (
+        "one slot should never become confident about a branching window"
+    )
+    assert followers_after_plus_one(2) == {5, 9}, (
+        "two slots must learn and prefetch both followers of a branching window"
+    )
+
+
+def test_lookahead_follows_the_predicted_chain():
+    p = NGramPrefetcher(degree=4)
+    stream = _stream_from_deltas([1], 40)
+    for ip, addr in stream[:-1]:
+        p.access_all(ip, addr)
+    ip, addr = stream[-1]
+    block = addr >> 6
+    got = [(c >> 6) - block for c in p.access_all(ip, addr)]
+    assert got == [1, 2, 3, 4], f"degree 4 on a +1 stride must reach 4 blocks ahead, got {got}"
+
+
+def test_lookahead_stops_when_the_chain_is_not_confident():
+    """+1 then +2 then +3 are learnable; what follows +3 is different every time.
+
+    From a window ending in +1, lookahead can confidently reach +2 and +3 and
+    must then stop, because the window [+3] never repeats its follower.
+    """
+    p = NGramPrefetcher(depth=1, degree=8)
+    block = 0x4000
+    stream = [(IP, block * BLOCK_SIZE)]
+    for rep in range(60):
+        for d in (1, 2, 3, 100 + 7 * rep):      # last step never repeats
+            block += d
+            stream.append((IP, block * BLOCK_SIZE))
+
+    longest = 0
+    for ip, addr in stream:
+        cands = p.access_all(ip, addr)
+        assert len(cands) <= 2, f"lookahead ran past the last confident step: {len(cands)}"
+        longest = max(longest, len(cands))
+    assert longest == 2, f"lookahead never reached the second confident step (max {longest})"
+
+
+def test_lookahead_never_modifies_the_table():
+    """Lookahead is read-only: training must be identical with and without it.
+
+    Compared after every access, not just at the end. A stray write from
+    lookahead only re-strengthens predictions that are already confident, so it
+    is invisible once counters saturate - it shows up as a counter reaching its
+    maximum one access early.
+    """
+    streams = [
+        _stream_from_deltas([1], 30),
+        _stream_from_deltas([3, 7, -2, 5, 3, 7, -2, 11], 40),
+    ]
+    for depth, stream in ((3, streams[0]), (2, streams[1])):
+        plain = NGramPrefetcher(depth=depth, slots=2)
+        ahead = NGramPrefetcher(depth=depth, slots=2, degree=6)
+        for i, (ip, addr) in enumerate(stream):
+            plain.access_all(ip, addr)
+            ahead.access_all(ip, addr)
+            for name in ("valid", "tags", "deltas", "confs"):
+                assert getattr(plain, name) == getattr(ahead, name), (
+                    f"lookahead changed table.{name} at access {i}"
+                )
+
+
+def test_multi_slot_retrains_when_a_follower_disappears():
+    """Stale slots must be displaced, not persist forever at high confidence."""
+    p = NGramPrefetcher(depth=1, slots=2)
+    for ip, addr in _stream_from_deltas([1, 5, 1, 9], 20):
+        p.access_all(ip, addr)
+    # Now the window [+1] is only ever followed by +7.
+    for ip, addr in _stream_from_deltas([1, 7], 30, base_block=0x9000):
+        p.access_all(ip, addr)
+    idx, tag = p._compute_hash([1])
+    _, _, slots = p.entry(idx)
+    assert 7 in [d for d, c in slots if c >= CONFIDENCE_THRESHOLD], (
+        f"the new follower +7 must become confident, slots={slots}"
+    )
+
+
+def test_one_novel_follower_does_not_evict_confident_slots():
+    """Hysteresis: a single unseen delta weakens established slots, not replaces them."""
+    p = NGramPrefetcher(depth=1, slots=2)
+    stream = _stream_from_deltas([1, 5, 1, 9], 20)
+    block = stream[-1][1] >> 6
+    for d in (1, 7):                      # exactly one +7 after a +1
+        block += d
+        stream.append((IP, block * BLOCK_SIZE))
+    for ip, addr in stream:
+        p.access_all(ip, addr)
+
+    idx, tag = p._compute_hash([1])
+    _, _, slots = p.entry(idx)
+    held = {d: c for d, c in slots}
+    assert set(held) == {5, 9}, f"one +7 must not evict an established follower, slots={slots}"
+    assert all(c >= CONFIDENCE_THRESHOLD for c in held.values()), (
+        f"both followers must stay confident after one miss, slots={slots}"
+    )
+
+
+def test_strongest_slot_is_issued_first_and_followed_by_lookahead():
+    """With unequal confidences, order and lookahead must favour the stronger slot."""
+    p = NGramPrefetcher(depth=1, slots=2, degree=2)
+    block = 0x4000
+    stream = [(IP, block * BLOCK_SIZE)]
+    # [+1] -> +5 three times (confidence 3), then [+1] -> +9 twice (confidence 2).
+    for d in (1, 5, 1, 5, 1, 5, 1, 9, 1, 9, 1):
+        block += d
+        stream.append((IP, block * BLOCK_SIZE))
+    out = []
+    for ip, addr in stream:
+        out = p.access_all(ip, addr)
+    got = [(c >> 6) - block for c in out]
+    assert got == [5, 9, 6], (
+        f"expected strongest (+5) first, then +9, then lookahead along +5 -> +1; got {got}"
+    )
+
+
+def test_stride_degree_prefetches_several_strides_ahead():
+    p = StridePrefetcher(degree=3)
+    base = 0x10000
+    out = []
+    for i in range(8):
+        out = p.access_all(IP, base + i * BLOCK_SIZE)
+    last = base + 7 * BLOCK_SIZE
+    assert out == [last + BLOCK_SIZE, last + 2 * BLOCK_SIZE, last + 3 * BLOCK_SIZE], out
+
+
+def test_stride_degree_deduplicates_sub_block_strides():
+    p = StridePrefetcher(degree=4)
+    out = []
+    for i in range(8):
+        out = p.access_all(IP, 0x20000 + i * 8)        # 8-byte stride, 64-byte blocks
+    assert len(out) == len(set(out)), f"duplicate block prefetches: {out}"
+
+
+def test_rejects_invalid_degree_and_slots():
+    for kwargs in ({"degree": 0}, {"slots": 0}):
+        try:
+            NGramPrefetcher(**kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"NGramPrefetcher({kwargs}) must be rejected")
+    try:
+        StridePrefetcher(degree=0)
+    except ValueError:
+        return
+    raise AssertionError("StridePrefetcher(degree=0) must be rejected")
 
 
 def run_tests():

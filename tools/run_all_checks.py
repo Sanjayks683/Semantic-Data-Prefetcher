@@ -4,14 +4,16 @@ run_all_checks.py - Run every check in the project and report a single verdict.
 
     python tools/run_all_checks.py
 
-Steps, in order:
-    1. parameter sync   - RTL package and Python config declare the same geometry
-    2. python unit tests - cache, both prefetchers, both trace parsers
-    3. RTL testbench     - self-checking, 65 assertions across 7 phases
-    4. co-simulation     - RTL and model agree access-for-access on every trace
+Steps, in order, each run for both configurations (v1 and v2):
+    1. parameter sync    - RTL package and Python config declare the same geometry
+    2. python unit tests - cache, simulator/latency, prefetchers, trace parsers
+    3. RTL testbench     - single-cycle core, self-checking, 7 phases
+    4. co-simulation     - single-cycle core agrees with the model on every access
+    5. pipeline equiv.   - pipelined core matches the single-cycle core every cycle
+    6. co-simulation     - pipelined core agrees with the model on every access
 
 Steps needing Icarus Verilog are skipped with a warning if it is not installed;
-everything else still runs.
+everything else still runs. Pass --require-rtl (as CI does) to fail instead.
 """
 
 import os
@@ -27,6 +29,7 @@ TOOLS = os.path.join(REPO, "tools")
 RTL_SOURCES = [
     "ngram_types_pkg.sv", "delta_generator.sv", "history_shift_reg.sv",
     "xor_hash.sv", "sram_table.sv", "confidence_fsm.sv", "ngram_prefetcher.sv",
+    "ngram_prefetcher_pipe.sv",
 ]
 
 
@@ -70,6 +73,10 @@ def main():
         "2/4a Python unit tests - cache",
         [py, "test_cache.py"], cwd=SIM)))
 
+    results.append(("simulator tests", run(
+        "2/4a Python unit tests - shared simulator and latency model",
+        [py, "test_simulator.py"], cwd=SIM)))
+
     for prof in PROFILES:
         results.append((f"prefetcher tests [{prof}]", run(
             f"2/4b Python unit tests - prefetchers and parsers  (profile {prof})",
@@ -105,8 +112,26 @@ def main():
                     ["vvp", out])))
 
             results.append((f"co-simulation [{prof}]", run(
-                f"4/4  RTL / model co-simulation  (profile {prof})",
+                f"4/6  RTL / model co-simulation, single-cycle core  (profile {prof})",
                 [py, os.path.join(TOOLS, "cosim_check.py")],
+                env={"NGRAM_PROFILE": prof})))
+
+            pipe_out = os.path.join(build, f"tb_pipe_equiv_{prof}.out")
+            pipe_compile_ok = run(
+                f"5/6a Compile pipeline equivalence testbench  (profile {prof})",
+                ["iverilog", "-g2012"] + defines[prof] + ["-o", pipe_out] +
+                [os.path.join(RTL, s) for s in RTL_SOURCES] +
+                [os.path.join(RTL, "tb", "tb_pipe_equiv.sv")])
+            results.append((f"pipe equiv compile [{prof}]", pipe_compile_ok))
+
+            if pipe_compile_ok:
+                results.append((f"pipe vs single-cycle [{prof}]", run(
+                    f"5/6b Pipelined core vs single-cycle core, every cycle  (profile {prof})",
+                    ["vvp", pipe_out])))
+
+            results.append((f"co-simulation pipe [{prof}]", run(
+                f"6/6  RTL / model co-simulation, pipelined core  (profile {prof})",
+                [py, os.path.join(TOOLS, "cosim_check.py"), "--core", "pipe"],
                 env={"NGRAM_PROFILE": prof})))
 
     print(f"\n{'=' * 78}\n  SUMMARY\n{'=' * 78}")

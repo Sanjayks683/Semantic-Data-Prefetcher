@@ -30,8 +30,7 @@ from array import array
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "sim"))
 
-from cache import Cache                          # noqa: E402
-from metrics import Metrics                      # noqa: E402
+from simulator import simulate                   # noqa: E402
 from stride_prefetcher import StridePrefetcher   # noqa: E402
 from ngram_prefetcher import NGramPrefetcher     # noqa: E402
 from trace_parser import get_trace_iterator      # noqa: E402
@@ -70,37 +69,10 @@ def load(trace, limit):
     return ips, addrs
 
 
-def run(ips, addrs, pf, level, l2_sets, l2_ways):
+def run(ips, addrs, pf, level, l2_sets, l2_ways, latency=0):
     """Simulate one predictor at the requested cache level."""
-    l1 = Cache()
-    l2 = Cache(sets=l2_sets, ways=l2_ways) if level == "l2" else None
-    target = l2 if level == "l2" else l1
-    m = Metrics()
-
-    for ip, addr in zip(ips, addrs):
-        if level == "l2":
-            l1_hit, _ = l1.access(addr, is_prefetch=False)
-            if l1_hit:
-                continue
-            l1.insert(addr, is_prefetch=False)
-
-        hit, useful = target.access(addr, is_prefetch=False)
-        m.record_access(hit, useful)
-        if not hit:
-            target.insert(addr, is_prefetch=False)
-
-        if pf is not None:
-            cand = pf.access(ip, addr)
-            if cand is not None:
-                m.record_prefetch_generated()
-                resident, _ = target.access(cand, is_prefetch=True)
-                if resident:
-                    m.record_prefetch_filtered()
-                else:
-                    m.record_prefetch(target.insert(cand, is_prefetch=True))
-
-    m.dead_prefetches = target.dead_prefetch_evictions
-    return m
+    return simulate(zip(ips, addrs), prefetcher=pf, level=level, latency=latency,
+                    l2_sets=l2_sets, l2_ways=l2_ways)
 
 
 def main():

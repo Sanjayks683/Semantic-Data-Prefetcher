@@ -41,6 +41,40 @@ TRACES = {
         "bytes": 802_283_392,
         "about": "SPEC CPU2017 discrete-event network simulator; irregular C++ heap access",
     },
+    # The six below widen the evaluation beyond two workloads. Each is the
+    # first SimPoint listed for its benchmark on the DPC-3 index, chosen by that
+    # rule before any results were seen so the set is not cherry-picked. The mix
+    # deliberately includes regular HPC codes where stride is expected to win.
+    "gcc": {
+        "file": "602.gcc_s-1850B.champsimtrace.xz",
+        "bytes": 704_840_332,
+        "about": "SPEC CPU2017 C compiler; irregular, pointer-heavy",
+    },
+    "xalancbmk": {
+        "file": "623.xalancbmk_s-10B.champsimtrace.xz",
+        "bytes": 585_081_904,
+        "about": "SPEC CPU2017 XSLT processor; DOM tree traversal",
+    },
+    "leela": {
+        "file": "641.leela_s-1052B.champsimtrace.xz",
+        "bytes": 407_406_940,
+        "about": "SPEC CPU2017 Go engine; Monte Carlo tree search",
+    },
+    "xz": {
+        "file": "657.xz_s-2302B.champsimtrace.xz",
+        "bytes": 520_262_744,
+        "about": "SPEC CPU2017 LZMA compression; match-finder hash chains",
+    },
+    "lbm": {
+        "file": "619.lbm_s-2676B.champsimtrace.xz",
+        "bytes": 771_515_968,
+        "about": "SPEC CPU2017 lattice Boltzmann fluid solver; regular array sweeps",
+    },
+    "bwaves": {
+        "file": "603.bwaves_s-1080B.champsimtrace.xz",
+        "bytes": 39_621_648,
+        "about": "SPEC CPU2017 blast-wave simulation; regular stencil access",
+    },
 }
 
 CHUNK = 1 << 20
@@ -63,11 +97,11 @@ def download(name, dest):
     expected = info["bytes"]
 
     if is_present(name, dest):
-        print(f"  {name:<8} already present ({expected / 2**20:.0f} MB), skipping")
+        print(f"  {name:<10} already present ({expected / 2**20:.0f} MB), skipping")
         return True
 
     os.makedirs(dest, exist_ok=True)
-    print(f"  {name:<8} {url}")
+    print(f"  {name:<10} {url}")
     print(f"           {expected / 2**20:.0f} MB -> {path}")
 
     t0 = time.time()
@@ -87,16 +121,16 @@ def download(name, dest):
                           f"({rate:.1f} MB/s)", flush=True)
                     next_report += 50 * 2**20
     except Exception as exc:
-        print(f"  {name:<8} FAILED: {exc}")
+        print(f"  {name:<10} FAILED: {exc}")
         return False
 
     if got != expected:
-        print(f"  {name:<8} FAILED: received {got:,} bytes, expected {expected:,}; "
+        print(f"  {name:<10} FAILED: received {got:,} bytes, expected {expected:,}; "
               f"partial file kept at {part}")
         return False
 
     os.replace(part, path)
-    print(f"  {name:<8} done in {time.time() - t0:.0f}s")
+    print(f"  {name:<10} done in {time.time() - t0:.0f}s")
     return True
 
 
@@ -110,7 +144,7 @@ def main():
     if args.list:
         for name, info in TRACES.items():
             state = "present" if is_present(name, args.dest) else "missing"
-            print(f"  {name:<8} {info['bytes'] / 2**20:6.0f} MB  {state:<8} {info['about']}")
+            print(f"  {name:<10} {info['bytes'] / 2**20:6.0f} MB  {state:<8} {info['about']}")
         return 0
 
     names = args.names or list(TRACES)
